@@ -422,9 +422,7 @@ class ConvBPDNDictLearn(dictlrn.DictLearn):
         dimN : int, optional (default 2)
           Number of spatial/temporal dimensions
         """
-
-        """ test reixach """
-
+        
         if opt is None:
             opt = ConvBPDNDictLearn.Options(xmethod=xmethod, dmethod=dmethod)
         if xmethod is None:
