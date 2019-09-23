@@ -36,7 +36,7 @@ class AKConvBPDN(object):
     by the wrapper.
     """
 
-    def __init__(self, xstep, D, S, W, *args, **kwargs):
+    def __init__(self, xstep, D, S, R, *args, **kwargs):
         """
         Parameters
         ----------
@@ -45,10 +45,12 @@ class AKConvBPDN(object):
           Dictionary array
         S : array_like
           Signal array
-        W : array_like
-          Mask array. The array shape must be such that the array is
-          compatible for multiplication with input array S (see
-          :func:`.cnvrep.mskWshape` for more details).
+        R : list_like
+          Rank list
+        # W : array_like
+        #   Mask array. The array shape must be such that the array is
+        #   compatible for multiplication with input array S (see
+        #   :func:`.cnvrep.mskWshape` for more details).
         *args
           Variable length list of arguments for constructor of internal
           xstep object
@@ -88,6 +90,20 @@ class AKConvBPDN(object):
         # Required because dictlrn.DictLearn assumes that all valid
         # xstep objects have an IterationStats attribute
         self.IterationStats = self.xstep.IterationStats
+
+        # Kruskal Decomposition Parameters
+        self.R = R
+        self.uniformRank = True
+        for i,el in enumerate(self.R,1):
+            self.uniformRank = self.uniformRank and el == self.R[i]
+
+        if self.uniformRank:
+            self.Z = np.random.randn(5, 5, 3, 25)   # Z is a nd array
+        else:
+            self.Z = list()
+            for i in range(self.cri.M):
+                self.Z.append(np.random.randn(self.cri.Nv[i],self.R[i]))
+
 
         # # Mask matrix
         # self.W = np.asarray(W.reshape(cr.mskWshape(W, self.cri)),
@@ -131,7 +147,15 @@ class AKConvBPDN(object):
         #                     axis=D.ndim-1)
         self.xstep.setdict(D)
 
+    def convolvedict():
+        #convolve dict
 
+
+        # if uniform rank
+
+
+
+        return 0
 
     def getcoef(self):
         """Get result of inner xstep object."""
