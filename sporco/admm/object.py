@@ -14,6 +14,7 @@ from builtins import range
 import copy
 from types import MethodType
 import numpy as np
+import tensorly as tl
 
 from sporco.admm import admm
 import sporco.cnvrep as cr
@@ -94,16 +95,15 @@ class AKConvBPDN(object):
         # Kruskal Decomposition Parameters
         self.R = R
         self.uniformRank = True
-        for i,el in enumerate(self.R,1):
-            self.uniformRank = self.uniformRank and el == self.R[i]
+        self.Z = list()
 
-        if self.uniformRank:
-            self.Z = np.random.randn(5, 5, 3, 25)   # Z is a nd array
-        else:
-            self.Z = list()
-            for i in range(self.cri.M):
-                self.Z.append(np.random.randn(self.cri.Nv[i],self.R[i]))
+        for k,Rk in enumerate(self.R,1):            # for each k
+            self.uniformRank = self.uniformRank and Rk == self.R[k]
+            Uk = list()
+            for i,Nvi in enumerate(self.cri.Nv):    # Ui
+                Uk.append(np.random.randn(Nvi,Rk)
 
+            self.Z.append(Uk)
 
         # # Mask matrix
         # self.W = np.asarray(W.reshape(cr.mskWshape(W, self.cri)),
@@ -140,33 +140,138 @@ class AKConvBPDN(object):
 
 
 
+    # def setdict(self, D=None):
+    #     """Set dictionary array."""
+    #
+    #     # Di = np.concatenate((D, sl.atleast_nd(D.ndim, self.imp)),
+    #     #                     axis=D.ndim-1)
+    #     self.xstep.setdict(D)
+
     def setdict(self, D=None):
-        """Set dictionary array."""
+    """Set dictionary array."""
 
-        # Di = np.concatenate((D, sl.atleast_nd(D.ndim, self.imp)),
-        #                     axis=D.ndim-1)
-        self.xstep.setdict(D)
+    if D is not None:
+        self.D = np.asarray(D, dtype=self.dtype)
+    # self.Df = sl.rfftn(self.D, self.cri.Nv, self.cri.axisN)
+    # # Compute D^H S
+    # self.DSf = np.conj(self.Df) * self.Sf
+    # if self.cri.Cd > 1:
+    #     self.DSf = np.sum(self.DSf, axis=self.cri.axisC, keepdims=True)
+    # if self.opt['HighMemSolve'] and self.cri.Cd == 1:
+    #     self.c = sl.solvedbi_sm_c(self.Df, np.conj(self.Df), self.rho,
+    #                               self.cri.axisM)
+    else:
+        self.c = None
 
-    def convolvedict():
-        #convolve dict
+    def expandZRankDec(self,l=None):
+
+        Nv = self.cri.Nv
+        if l is not None: del Nv[l-1]       # remove l dimension
+
+        Tzlst = list()
+        for k,Uk in enumerate(self.Z):      # for each k
+            if l is not None: del Uk[l-1]   # remove l dimension
+
+            Tzk = tl.tenalg.khatri_rao(Uk)
+            Nvk = Nv
+            Nvk.append(self.R[k])           # rank-decomposed
+            Tzlst.append(tl.base.vec_to_tensor(Tzk,Nvk))
+
+        if self.uniformRank:
+            return np.stack(Tzlst,axis=self.cri.dimN+1)  # as array Tz(N0,N1,...,K,R)
+        else:
+            return Tzlst                                 # as list Tzk(N0,N1,...,R)
 
 
-        # if uniform rank
+    def expandZ(self):
+
+        Nv = self.cri.Nv
+
+        Tzlst = list()
+        for k,Uk in enumerate(self.Z):      # for each k
+            weights = np.ones([self.R[k],1])
+            if l is not None: del Uk[l-1]   # remove l dimension
+
+            Tzk = np.dot(tl.tenalg.khatri_rao(Uk),weights)
+            Tzlst.append(tl.base.vec_to_tensor(Tzk,Nv))
+
+        return np.stack(Tzlst,axis=self.cri.dimN)  # as array Tz(N0,N1,...,K)
 
 
 
-        return 0
+    def convolvedict(self,l=None):
+
+        axisN = self.cri.axisN
+        Nv = self.cri.Nv
+
+        Tz = self.expandZRankDec(l)
+
+        # TzFull and DFull
+        Tzlst = list()
+        Dlst = list()
+        if self.uniformRank:
+            for i in range(Nv[l-1]):
+                Tzlst.append(Tz)                   # Z for each j
+
+            TzFull = np.stack(Tzlst,axis=l-1)           # As array
+
+            for r in range(self.R[0]):
+                Dlst.append(self.D)
+
+            DFull = np.stack(Dlst,axis=self.cri.dimN+1) # As array  D(N0,N1,...,K,R)
+
+        else:
+            TzFull = list()
+            DFull = list()
+            for k,Tzk in enumerate(Tz):            # for each k
+                for i in range(Nv[l-1]):
+                    Tzlst.append(Tzk)              # Z for each j
+
+                TzFull.append(np.stack(Tzlst,axis=l-1)) # As list
+
+            for k,Rk in enumerate(self.R):              # for each k
+                for r in range(Rk):
+                    Dlst.append(np.take(self.D,k,self.cri.dimN))
+
+                DFull.append(np.stack(Dlst,axis=self.cri.dimN+1))   # As list Dk(N0,N1,...,R)
+
+        # Purge l
+        if l is not None:
+            del axisN[l-1]                              # remove l dimension
+            del Nv[l-1]
+
+        # Convolve
+        if self.uniformRank:
+            Xf = sl.rfftn(TzFull,None,axisN)
+            Df = sl.rfftn(self.D,Nv,axisN)
+            Dcf = np.multiply(Df,Xf)
+
+        else:
+            Dcf = list()
+            for k,Tzk in enumerate(Tzfull):              # for each k
+                Xfk = sl.rfftn(Tzk,None,axisN)
+                Dfk = sl.rfftn(self.D,Nv,axisN)
+                Dcf.append(np.multiply(Df,Xf))
+
+        return Dcf
+
 
     def getcoef(self):
         """Get result of inner xstep object."""
 
-        return self.xstep.getcoef()
+        return self.expandZ()
 
 
     def reconstruct(self, X=None):
         """Reconstruct representation."""
 
-        return self.xstep.reconstruct()
+        Tz = self.expandZ(l)
+
+        Xf = sl.rfftn(Tz,None,self.cri.axisN)
+        Df = sl.rfftn(self.D,Nv,self.cri.axisN)     # Self.Df is not stored
+        Sf = np.sum(Df*Xf, axis=self.cri.axisM)
+
+        return sl.irfftn(Sf, self.cri.Nv, self.cri.axisN)
 
 
 
