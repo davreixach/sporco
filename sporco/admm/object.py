@@ -13,8 +13,10 @@ from builtins import range
 
 import copy
 from types import MethodType
+
 import numpy as np
 import tensorly as tl
+from scipy.linalg import block_diag
 
 from sporco.admm import admm
 import sporco.cnvrep as cr
@@ -46,8 +48,8 @@ class AKConvBPDN(object):
           Dictionary array
         S : array_like
           Signal array
-        R : list_like
-          Rank list
+        R : array_like
+          Rank array
         # W : array_like
         #   Mask array. The array shape must be such that the array is
         #   compatible for multiplication with input array S (see
@@ -94,16 +96,9 @@ class AKConvBPDN(object):
 
         # Kruskal Decomposition Parameters
         self.R = R
-        self.uniformRank = True
         self.Z = list()
-
-        for k,Rk in enumerate(self.R,1):            # for each k
-            self.uniformRank = self.uniformRank and Rk == self.R[k]
-            Uk = list()
-            for i,Nvi in enumerate(self.cri.Nv):    # Ui
-                Uk.append(np.random.randn(Nvi,Rk)
-
-            self.Z.append(Uk)
+        for i,Nvi in enumerate(self.cri.Nv):                    # Ui
+            self.Z.append(np.random.randn(Nvi,np.sum(self.R)))
 
         # # Mask matrix
         # self.W = np.asarray(W.reshape(cr.mskWshape(W, self.cri)),
@@ -132,12 +127,13 @@ class AKConvBPDN(object):
 
         # Call solve method of inner xstep object
         Xi = self.xstep.solve()
+
         # Copy attributes from inner xstep object
         self.timer = self.xstep.timer
         self.itstat = self.xstep.itstat
+
         # Return result of inner xstep object
         return Xi
-
 
 
     # def setdict(self, D=None):
@@ -164,96 +160,77 @@ class AKConvBPDN(object):
         self.c = None
 
     def expandZRankDec(self,l=None):
+    """Expand Kruskal Zl (Rank Decomposed)."""
 
         Nv = self.cri.Nv
-        if l is not None: del Nv[l-1]       # remove l dimension
+        R = self.R
 
-        Tzlst = list()
-        for k,Uk in enumerate(self.Z):      # for each k
-            if l is not None: del Uk[l-1]   # remove l dimension
+        if l is not None:
+            Nv = np.delete(Nv,[l-1])            # remove l dimension
+            R = np.delete(R,[l-1])
 
-            Tzk = tl.tenalg.khatri_rao(Uk)
-            Nvk = Nv
-            Nvk.append(self.R[k])           # rank-decomposed
-            Tzlst.append(tl.base.vec_to_tensor(Tzk,Nvk))
+        Nv.append(np.sum(Rv))
 
-        if self.uniformRank:
-            return np.stack(Tzlst,axis=self.cri.dimN+1)  # as array Tz(N0,N1,...,K,R)
-        else:
-            return Tzlst                                 # as list Tzk(N0,N1,...,R)
+        Tz = tl.tenalg.khatri_rao(self.Z)
+
+        return tl.base.vec_to_tensor(Tz,Nv)     # as array Tz(N0,N1,...,K*R)
 
 
     def expandZ(self):
+    """Expand Kruskal Z."""
 
         Nv = self.cri.Nv
+        R = self.R
 
-        Tzlst = list()
-        for k,Uk in enumerate(self.Z):      # for each k
-            weights = np.ones([self.R[k],1])
-            if l is not None: del Uk[l-1]   # remove l dimension
+        Nv.append(np.sum(Rv))
 
-            Tzk = np.dot(tl.tenalg.khatri_rao(Uk),weights)
-            Tzlst.append(tl.base.vec_to_tensor(Tzk,Nv))
+        Tzk = np.dot(tl.tenalg.khatri_rao(self.Z),self.getweights)
 
-        return np.stack(Tzlst,axis=self.cri.dimN)  # as array Tz(N0,N1,...,K)
-
+        return tl.base.vec_to_tensor(Tzk,Nv)     # as array Tz(N0,N1,...,K)
 
 
     def convolvedict(self,l=None):
+    """~D: Convolve D w/ Zl."""
 
         axisN = self.cri.axisN
         Nv = self.cri.Nv
+        M = self.cri.M                              # Number of filters K
 
         Tz = self.expandZRankDec(l)
 
-        # TzFull and DFull
+        # TzFull
         Tzlst = list()
-        Dlst = list()
-        if self.uniformRank:
-            for i in range(Nv[l-1]):
-                Tzlst.append(Tz)                   # Z for each j
+        for i in range(Nv[l-1]):
+            Tzlst.append(Tz)                        # Z for each j
 
-            TzFull = np.stack(Tzlst,axis=l-1)           # As array
+        TzFull = np.stack(Tzlst,axis=l-1)           # As array
 
-            for r in range(self.R[0]):
-                Dlst.append(self.D)
-
-            DFull = np.stack(Dlst,axis=self.cri.dimN+1) # As array  D(N0,N1,...,K,R)
-
-        else:
-            TzFull = list()
-            DFull = list()
-            for k,Tzk in enumerate(Tz):            # for each k
-                for i in range(Nv[l-1]):
-                    Tzlst.append(Tzk)              # Z for each j
-
-                TzFull.append(np.stack(Tzlst,axis=l-1)) # As list
-
-            for k,Rk in enumerate(self.R):              # for each k
-                for r in range(Rk):
-                    Dlst.append(np.take(self.D,k,self.cri.dimN))
-
-                DFull.append(np.stack(Dlst,axis=self.cri.dimN+1))   # As list Dk(N0,N1,...,R)
+        # DzFull
+        DFull = np.reshape(self.D,[np.prod(Nv),M],order='F')
+        DFull = np.dot(DFull,np.transpose(self.getweights))
+        DFull = np.reshape(DFull,[np.prod(Nv),np.sum(self.R)],order='F') # As array D(N0,N1,...,K,R)
 
         # Purge l
         if l is not None:
-            del axisN[l-1]                              # remove l dimension
-            del Nv[l-1]
+            axisN = np.delete(axisN,[l-1])       # remove l dimension
+            Nv = np.delete(Nv,[l-1])
 
         # Convolve
-        if self.uniformRank:
-            Xf = sl.rfftn(TzFull,None,axisN)
-            Df = sl.rfftn(self.D,Nv,axisN)
-            Dcf = np.multiply(Df,Xf)
-
-        else:
-            Dcf = list()
-            for k,Tzk in enumerate(Tzfull):              # for each k
-                Xfk = sl.rfftn(Tzk,None,axisN)
-                Dfk = sl.rfftn(self.D,Nv,axisN)
-                Dcf.append(np.multiply(Df,Xf))
+        Xf = sl.rfftn(TzFull,None,axisN)
+        Df = sl.rfftn(self.D,Nv,axisN)
+        Dcf = np.multiply(Df,Xf)
 
         return Dcf
+
+
+    def getweights(self):
+        """Linear map from [NxR*K] to [NxK] array."""
+
+        weightsArray = list()
+        for k,Rk in enumerate(self.R):
+            weightsArray.append(np.ones([Rk,1]))
+
+        return block_diag(*weightsArray)                 # map from R*K to K
 
 
     def getcoef(self):
@@ -265,14 +242,13 @@ class AKConvBPDN(object):
     def reconstruct(self, X=None):
         """Reconstruct representation."""
 
-        Tz = self.expandZ(l)
+        Tz = self.expandZ()
 
         Xf = sl.rfftn(Tz,None,self.cri.axisN)
         Df = sl.rfftn(self.D,Nv,self.cri.axisN)     # Self.Df is not stored
         Sf = np.sum(Df*Xf, axis=self.cri.axisM)
 
         return sl.irfftn(Sf, self.cri.Nv, self.cri.axisN)
-
 
 
     def getitstat(self):
