@@ -19,6 +19,7 @@ import tensorly as tl
 from scipy.linalg import block_diag
 
 from sporco.admm import admm
+from sporco.admm import cbpdn
 import sporco.cnvrep as cr
 import sporco.linalg as sl
 import sporco.prox as sp
@@ -39,7 +40,8 @@ class AKConvBPDN(object):
     by the wrapper.
     """
 
-    def __init__(self, xstep, D, S, R, *args, **kwargs):
+    def __init__(self, D0, S, R, xmethod='convbpdn', lmbda=None, optx=None,
+                dimK=None, dimN=2,*args, **kwargs):
         """
         Parameters
         ----------
@@ -50,65 +52,63 @@ class AKConvBPDN(object):
           Signal array
         R : array_like
           Rank array
-        # W : array_like
-        #   Mask array. The array shape must be such that the array is
-        #   compatible for multiplication with input array S (see
-        #   :func:`.cnvrep.mskWshape` for more details).
+        lmbda : list of float
+          Regularisation parameter
+        opt : list containing :class:`ConvBPDN.Options` object
+          Algorithm options for each individual solver
+        dimK : 0, 1, or None, optional (default None)
+          Number of dimensions in input signal corresponding to multiple
+          independent signals
+        dimN : int, optional (default 2)
+          Number of spatial/temporal dimensions
         *args
           Variable length list of arguments for constructor of internal
-          xstep object
+          xstep object (e.g. mu)
         **kwargs
           Keyword arguments for constructor of internal xstep object
         """
 
+        # Parse mu
+        if 'mu' in kwargs:
+            mu = kwargs['mu']
+        else:
+            mu = None
+
         # Number of channel dimensions
-        if 'dimK' in kwargs:
-            dimK = kwargs['dimK']
-        else:
-            dimK = None
+        if self.xmethod.lower() != 'convbpdn' and self.xmethod.lower() !='convelasticnet':
+            raise ValueError('Parameter xmethod accepted values are: ''ConvBPDN'' '
+                                'and ''ConvElasticNet''')
 
-        # Number of spatial dimensions
-        if 'dimN' in kwargs:
-            dimN = kwargs['dimN']
-        else:
-            dimN = 2
-
-        # Infer problem dimensions
+        # Infer outer problem dimensions
         self.cri = cr.CSC_ConvRepIndexing(D, S, dimK=dimK, dimN=dimN)
 
-        # # Construct impulse filter (or filters for the multi-channel
-        # # case) and append to dictionary
-        # if self.cri.Cd == 1:
-        #     self.imp = np.zeros(D.shape[0:dimN] + (1,))
-        #     self.imp[(0,)*dimN] = 1.0
-        # else:
-        #     self.imp = np.zeros(D.shape[0:dimN] + (self.cri.Cd,)*2)
-        #     for c in range(0, self.cri.Cd):
-        #         self.imp[(0,)*dimN + (c, c,)] = 1.0
-        # Di = np.concatenate((D, self.imp), axis=D.ndim-1)
-
-        # Construct inner xstep object
-        self.xstep = xstep
-
-        # Required because dictlrn.DictLearn assumes that all valid
-        # xstep objects have an IterationStats attribute
-        self.IterationStats = self.xstep.IterationStats
-
-        # Kruskal Decomposition Parameters
+        # Decomposed Kruskal Initialization
         self.R = R
         self.Z = list()
         for i,Nvi in enumerate(self.cri.Nv):                    # Ui
             self.Z.append(np.random.randn(Nvi,np.sum(self.R)))
 
-        # # Mask matrix
-        # self.W = np.asarray(W.reshape(cr.mskWshape(W, self.cri)),
-        #                     dtype=self.xstep.dtype)
-        # # If Cd > 1 (i.e. a multi-channel dictionary) and mask has a
-        # # non-singleton channel dimension, swap that axis onto the
-        # # dictionary filter index dimension (where the
-        # # multiple-channel impulse filters are located)
-        # if self.cri.Cd > 1 and self.W.shape[self.cri.dimN] > 1:
-        #     self.W = np.swapaxes(self.W, self.cri.axisC, self.cri.axisM)
+        # Store initial Dictionary
+        self.setdict(D0)
+
+        # Store input signal
+        self.S = S
+
+        # Construct inner xstep object
+        self.xstep = list()
+        for l in range(self.cri.dimN)
+            D0c = self.convolvedict(l)
+            Sl = self.reshapesignal(l)
+            if self.xmethod.lower() != 'convbpdn':
+                xstep.append(cbpdn.ConvBPDN(D0c, Sl, lmbda[l], optx[l],
+                    dimK=self.cri.dimK, dimN=1))
+            else:
+                xstep.append(cbpdn.ConvElasticNet(D0c, Sl, lmbda[l], mu[l],
+                    optx[l], dimK=self.cri.dimK, dimN=1))
+
+        # Required because dictlrn.DictLearn assumes that all valid
+        # xstep objects have an IterationStats attribute
+        self.IterationStats = self.xstep.IterationStats
 
         # # Record ystep method of inner xstep object
         # self.inner_ystep = self.xstep.ystep
@@ -119,6 +119,7 @@ class AKConvBPDN(object):
         # self.inner_obfn_gvar = self.xstep.obfn_gvar
         # # Replace obfn_gvar method of inner xstep object with outer obfn_gvar
         # self.xstep.obfn_gvar = MethodType(AKConvBPDN.obfn_gvar, self)
+
 
     def solve(self):
         """Call the solve method of the inner cbpdn object and return the
@@ -136,28 +137,11 @@ class AKConvBPDN(object):
         return Xi
 
 
-    # def setdict(self, D=None):
-    #     """Set dictionary array."""
-    #
-    #     # Di = np.concatenate((D, sl.atleast_nd(D.ndim, self.imp)),
-    #     #                     axis=D.ndim-1)
-    #     self.xstep.setdict(D)
-
-    def setdict(self, D=None):
+    def setdict(self, D):
     """Set dictionary array."""
 
-    if D is not None:
-        self.D = np.asarray(D, dtype=self.dtype)
-    # self.Df = sl.rfftn(self.D, self.cri.Nv, self.cri.axisN)
-    # # Compute D^H S
-    # self.DSf = np.conj(self.Df) * self.Sf
-    # if self.cri.Cd > 1:
-    #     self.DSf = np.sum(self.DSf, axis=self.cri.axisC, keepdims=True)
-    # if self.opt['HighMemSolve'] and self.cri.Cd == 1:
-    #     self.c = sl.solvedbi_sm_c(self.Df, np.conj(self.Df), self.rho,
-    #                               self.cri.axisM)
-    else:
-        self.c = None
+        self.D = np.asarray(D)
+
 
     def expandZRankDec(self,l=None):
     """Expand Kruskal Zl (Rank Decomposed)."""
@@ -193,22 +177,24 @@ class AKConvBPDN(object):
     """~D: Convolve D w/ Zl."""
 
         axisN = self.cri.axisN
+        N = self.cri.N
         Nv = self.cri.Nv
         M = self.cri.M                              # Number of filters K
+        dsz = self.cri.dsz                          # Diccionary Size
 
         Tz = self.expandZRankDec(l)
 
         # TzFull
         Tzlst = list()
-        for i in range(Nv[l-1]):
+        for i in range(dsz[l-1]):
             Tzlst.append(Tz)                        # Z for each j
 
-        TzFull = np.stack(Tzlst,axis=l-1)           # As array
+        TzFull = np.stack(Tzlst,axis=l-1)           # As array Tz(N0,N1,...,Nl,...,K*R)
 
         # DzFull
-        DFull = np.reshape(self.D,[np.prod(Nv),M],order='F')
+        DFull = np.reshape(self.D,[N,M],order='F')
         DFull = np.dot(DFull,np.transpose(self.getweights))
-        DFull = np.reshape(DFull,[np.prod(Nv),np.sum(self.R)],order='F') # As array D(N0,N1,...,K,R)
+        DFull = np.reshape(DFull,[Nv,np.sum(self.R)],order='F') # As array D(N0,N1,...,K*R)
 
         # Purge l
         if l is not None:
@@ -217,10 +203,13 @@ class AKConvBPDN(object):
 
         # Convolve
         Xf = sl.rfftn(TzFull,None,axisN)
-        Df = sl.rfftn(self.D,Nv,axisN)
+        Df = sl.rfftn(DFull,Nv,axisN)
         Dcf = np.multiply(Df,Xf)
+        Dc = sl.irrftn(Dcf,Nv,axisN)
 
-        return Dcf
+        Dc = np.moveaxis(Dc,l-1,0)              # spatial dimension at first place
+
+        return np.reshape(Dc,[dsz[l-1],np.prod(Nv),np.sum(self.R)],order='F')) # As array Dc(Dl,N',K*R)
 
 
     def getweights(self):
@@ -233,10 +222,28 @@ class AKConvBPDN(object):
         return block_diag(*weightsArray)                 # map from R*K to K
 
 
+    def reshapesignal(self,l):
+        """Reshape S from [N1xN2x...xNp] to [NlxC] array."""
+
+        Nv = self.cri.Nv
+        C = int(self.cri.N/Nv[l-1])
+        Q = self.cri.K              # multi-signal
+
+        Sl = np.moveaxis(self.S,l-1,0)
+
+        return np.reshape(Sl,[Nv[l-1],C,Q],order='F').squeeze()  # As array S(Nl,C,Q)
+
+
     def getcoef(self):
         """Get result of inner xstep object."""
 
         return self.expandZ()
+
+
+    def getKruskal(self):
+        """Get decomposed Krukal Z."""
+
+        return self.Z()
 
 
     def reconstruct(self, X=None):
