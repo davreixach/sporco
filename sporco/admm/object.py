@@ -10,6 +10,7 @@ from __future__ import division
 from __future__ import absolute_import
 from __future__ import print_function
 from builtins import range
+from builtins import object
 
 import copy
 from types import MethodType
@@ -27,6 +28,131 @@ from sporco.util import u
 
 
 __author__ = """David Reixach <dreixach@iri.upc.edu>"""
+
+class IterStatsConfig(object):
+    """Configuration object for Alternated Kruscal ConvBPDN learning algorithm
+    iteration statistics.
+
+    Adaptation from Sporco ditclearn::IterStatsConfig
+
+    """
+
+    fwiter = 4
+    """Field width for iteration count display column"""
+    fpothr = 2
+    """Field precision for other display columns"""
+
+
+    def __init__(self, isfld, isxmap, evlmap, hdrtxt, hdrmap,
+                 fmtmap=None):
+        """
+        Parameters
+        ----------
+        isfld : list
+          List of field names for iteration statistics namedtuple
+        isxmap : dict
+          Dictionary mapping iteration statistics namedtuple field names
+          to field names in corresponding X step object iteration
+          statistics namedtuple
+        evlmap : dict
+          Dictionary mapping iteration statistics namedtuple field names
+          to labels in the dict returned by :meth:`DictLearn.evaluate`
+        hdrtxt : list
+          List of column header titles for verbose iteration statistics
+          display
+        hdrmap : dict
+          Dictionary mapping column header titles to IterationStats entries
+        fmtmap : dict, optional (default None)
+          A dict providing a mapping from field header strings to print
+          format strings, providing a mechanism for fields with print
+          formats that depart from the standard format
+        """
+
+        self.IterationStats = collections.namedtuple('IterationStats', isfld)
+        self.isxmap = isxmap
+        self.evlmap = evlmap
+        self.hdrtxt = hdrtxt
+        self.hdrmap = hdrmap
+
+        # Call utility function to construct status display formatting
+        self.hdrstr, self.fmtstr, self.nsep = common.solve_status_str(
+            hdrtxt, fmtmap=fmtmap, fwdth0=type(self).fwiter,
+            fprec=type(self).fpothr)
+
+
+
+    def iterstats(self, j, t, isx, evl):
+        """Construct IterationStats namedtuple from X step list
+        IterationStats namedtuples.
+
+        Parameters
+        ----------
+        j : int
+          Iteration number
+        t : float
+          Iteration time
+        isx : namedtuple
+          IterationStats namedtuple from X step object
+        evl : dict
+          Dict associating result labels with values computed by
+          :meth:`DictLearn.evaluate`
+        """
+
+        vlst = []
+        # Iterate over the fields of the IterationStats namedtuple
+        # to be populated with values. If a field name occurs as a
+        # key in the isxmap dictionary, use the corresponding key
+        # value as a field name in the isx namedtuple for the X
+        # step object and append the value of that field as the
+        # next value in the IterationStats namedtuple under
+        # construction. There are also two reserved field
+        # names, 'Iter' and 'Time', referring respectively to the
+        # iteration number and run time of the dictionary learning
+        # algorithm.
+        for fnm in self.IterationStats._fields:
+            if fnm in self.isxmap:
+                vlst.append(getattr(isx, self.isxmap[fnm]))
+            elif fnm in self.evlmap:
+                vlst.append(evl[fnm])
+            elif fnm == 'Iter':
+                vlst.append(j)
+            elif fnm == 'Time':
+                vlst.append(t)
+            else:
+                vlst.append(None)
+
+        return self.IterationStats._make(vlst)
+
+
+
+    def printheader(self):
+        """Print status display header and separator strings."""
+
+        print(self.hdrstr)
+        self.printseparator()
+
+
+
+    def printseparator(self):
+        "Print status display separator string."""
+
+        print("-" * self.nsep)
+
+
+
+    def printiterstats(self, itst):
+        """Print iteration statistics.
+
+        Parameters
+        ----------
+        itst : namedtuple
+          IterationStats namedtuple as returned by :meth:`iterstats`
+        """
+
+        itdsp = tuple([getattr(itst, self.hdrmap[col]) for col in self.hdrtxt])
+        print(self.fmtstr % itdsp)
+
+
 
 class AKConvBPDN(object):
     """Boundary masking for convolutional representations using the
@@ -68,13 +194,7 @@ class AKConvBPDN(object):
           Keyword arguments for constructor of internal xstep object
         """
 
-        # Parse mu
-        if 'mu' in kwargs:
-            mu = kwargs['mu']
-        else:
-            mu = None
-
-        # Number of channel dimensions
+        # Check method
         if self.xmethod.lower() != 'convbpdn' and self.xmethod.lower() !='convelasticnet':
             raise ValueError('Parameter xmethod accepted values are: ''ConvBPDN'' '
                                 'and ''ConvElasticNet''')
@@ -82,43 +202,76 @@ class AKConvBPDN(object):
         # Infer outer problem dimensions
         self.cri = cr.CSC_ConvRepIndexing(D, S, dimK=dimK, dimN=dimN)
 
+        # Parse mu
+        if 'mu' in kwargs:
+            mu = kwargs['mu']
+        else:
+            mu = [None] * self.cri.dimN
+
+        # Parse lmbda and opt
+        if lmbda is None: lmbda =  [None] * self.cri.dimN
+        if optx is None: optx =  [None] * self.cri.dimN
+
+        # Parse isc
+        if 'isc' in kwargs:
+            isc = kwargs['isc']
+        else:
+            isc = None
+
         # Decomposed Kruskal Initialization
         self.R = R
         self.Z = list()
         for i,Nvi in enumerate(self.cri.Nv):                    # Ui
             self.Z.append(np.random.randn(Nvi,np.sum(self.R)))
 
-        # Store initial Dictionary
-        self.setdict(D0)
-
-        # Store input signal
+        # Store arguments
         self.S = S
+        self.setdict(D0)
+        self.lmbda = lmbda
+        self.optx = optx
+        self.mu = mu
 
-        # Construct inner xstep object
-        self.xstep = list()
-        for l in range(self.cri.dimN)
-            D0c = self.convolvedict(l)
-            Sl = self.reshapesignal(l)
-            if self.xmethod.lower() != 'convbpdn':
-                xstep.append(cbpdn.ConvBPDN(D0c, Sl, lmbda[l], optx[l],
-                    dimK=self.cri.dimK, dimN=1))
-            else:
-                xstep.append(cbpdn.ConvElasticNet(D0c, Sl, lmbda[l], mu[l],
-                    optx[l], dimK=self.cri.dimK, dimN=1))
+        # Init isc
+        if isc is None:
+
+            isc_lst = []                       # itStats from block-solver
+            isc_fields = []
+            for i = in range(self.cri.dimN):
+                str_i = '_{0!s}'.format(i)
+
+                isc_i = IterStatsConfig(
+                    isfld=['ObjFun'+str_i, 'PrimalRsdl'+str_i,'DualRsdl'+str_i,
+                            'Rho'+str_i],
+                    isxmap={'ObjFun'+str_i: 'ObjFun', 'PrimalRsdl'+str_i: 'PrimalRsdl',
+                            'DualRsdl'+str_i: 'DualRsdl', 'Rho'+str_i: 'Rho'},
+                    evlmap={},
+                    hdrtxt=['Fnc'+str_i, 'r'+str_i, 's'+str_i, u('ρ'+str_i)],
+                    hdrmap={'Fnc'+str_i: 'ObjFun'+str_i, 'r'+str_i: 'PrimalRsdl'+str_i,
+                            's'+str_i: 'DualRsdl'+str_i, u('ρ'+str_i): 'Rho'+str_i}
+                )
+                isc_fields += isc_i._fields
+
+                isc_lst.append(isc_i)
+
+            # isc_it = IterStatsConfig(       # global itStats  -> No, to be managed in dictlearn
+            #     isfld=['Iter','Time'],
+            #     isxmap={},
+            #     evlmap={},
+            #     hdrtxt=['Itn'],
+            #     hdrmap={'Itn': 'Iter'}
+            # )
+            #
+            # isc_fields += isc_it._fields
+
+        self.isc_lst = isc_lst
+        # self.isc_it = isc_it
+        self.isc = collections.namedtuple('IterationStats', isc_fields)
 
         # Required because dictlrn.DictLearn assumes that all valid
         # xstep objects have an IterationStats attribute
-        self.IterationStats = self.xstep.IterationStats
+        # self.IterationStats = self.xstep.IterationStats
 
-        # # Record ystep method of inner xstep object
-        # self.inner_ystep = self.xstep.ystep
-        # # Replace ystep method of inner xstep object with outer ystep
-        # self.xstep.ystep = MethodType(AKConvBPDN.ystep, self)
-        #
-        # # Record obfn_gvar method of inner xstep object
-        # self.inner_obfn_gvar = self.xstep.obfn_gvar
-        # # Replace obfn_gvar method of inner xstep object with outer obfn_gvar
-        # self.xstep.obfn_gvar = MethodType(AKConvBPDN.obfn_gvar, self)
+        self.itstat = []
 
 
     def solve(self):
@@ -126,15 +279,36 @@ class AKConvBPDN(object):
         result.
         """
 
-        # Call solve method of inner xstep object
-        Xi = self.xstep.solve()
+        self.xstep = []
+        
+        itst = []
+        for l in range(self.cri.dimN):
 
-        # Copy attributes from inner xstep object
-        self.timer = self.xstep.timer
-        self.itstat = self.xstep.itstat
+            D0c = self.convolvedict(l+1)                # convolvedict
+            Sl = self.reshapesignal(l+1)                # reshapesignal
 
-        # Return result of inner xstep object
-        return Xi
+            # Construct 1-dim xstep
+            if self.xmethod.lower() == 'convbpdn':      # ConvBPDN
+                self.xstep.append(cbpdn.ConvBPDN(D0c, Sl, self.lmbda[l], self.optx[l],
+                    dimK=self.cri.dimK, dimN=1))
+            else:                                       # ConvElasticNet
+                self.xstep.append(cbpdn.ConvElasticNet(D0c, Sl, self.lmbda[l], self.mu[l],
+                    self.optx[l], dimK=self.cri.dimK, dimN=1))
+
+            # Solve
+            self.xstep[l].solve()
+
+            # Post x-step
+            self.Z(l) = self.xstep[l].getcoef()         # Update Kruskal
+
+            # IterationStats
+            xitstat = self.xstep.itstat[-1] if self.xstep.itstat else \
+                      self.xstep.IterationStats(
+                          *([0.0,] * len(self.xstep.IterationStats._fields)))
+
+            itst += self.isc_lst[l].iterstats(0, 0, xitstat, 0) # Accumulate
+
+        self.itstat.append(self.isc(*itst))      # Cast to global itstats and store
 
 
     def setdict(self, D):
@@ -259,6 +433,6 @@ class AKConvBPDN(object):
 
 
     def getitstat(self):
-        """Get iteration stats from inner xstep object."""
+        """Get iteration stats."""
 
-        return self.xstep.getitstat()
+        return self.itstat
