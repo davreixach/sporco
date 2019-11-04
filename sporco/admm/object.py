@@ -18,7 +18,6 @@ import collections
 
 import numpy as np
 import tensorly as tl
-from scipy.linalg import block_diag
 
 from sporco import cdict
 from sporco import util
@@ -496,30 +495,31 @@ class AKConvBPDN(object):
         self.opt = opt
 
         # Infer outer problem dimensions
-        # self.cri = cr.CSC_ConvRepIndexing(D0, S, dimK=dimK, dimN=dimN)
         self.cri = cr.CDU_ConvRepIndexing(D0.shape, S, dimK=dimK, dimN=dimN)
 
-        # Parse mu
-        if 'mu' in kwargs:
-            mu = kwargs['mu']
-        else:
-            mu = [0] * self.cri.dimN
+            # Parse mu
+            if 'mu' in kwargs:
+                mu = kwargs['mu']
+            else:
+                mu = [0] * self.cri.dimN
 
-        # Parse lmbda and optx
-        if lmbda is None: lmbda =  [None] * self.cri.dimN
-        if optx is None: optx =  [None] * self.cri.dimN
+            # Parse lmbda and optx
+            if lmbda is None: lmbda =  [None] * self.cri.dimN
+            if optx is None: optx =  [None] * self.cri.dimN
 
-        # Parse isc
-        if 'isc' in kwargs:
-            isc = kwargs['isc']
-        else:
-            isc = None
+            # Parse isc
+            if 'isc' in kwargs:
+                isc = kwargs['isc']
+            else:
+                isc = None
 
         # Decomposed Kruskal Initialization
         self.R = R
         self.Kf = []
         for i,Nvi in enumerate(self.cri.Nv):                    # Ui
             self.Kf.append(np.random.randn(Nvi,np.sum(self.R)))
+
+        self.K = [None]*self.cri.dimN
 
         # Store arguments
         self.S = np.reshape(S,[S.size,1],order='F')     # as a vector column
@@ -528,12 +528,11 @@ class AKConvBPDN(object):
         self.optx = optx
         self.mu = mu
 
-        # Init KCSC solver
-        # Needs to be initiated inside AKConvBPDN because requires convolvedict() and reshapesignal()
+        # Init KCSC solver (Needs to be initiated inside AKConvBPDN because requires convolvedict() and reshapesignal())
         self.xstep = []
         for l in range(self.cri.dimN):
 
-            Wl = self.convolvedict(l+1)                # convolvedict
+            Wl = self.convolvedict(l)                # convolvedict
 
             self.xstep.append(KConvBPDN(Wl, self.S, self.lmbda[l], self.optx[l],
                     dimK=self.cri.dimK, dimN=1))
@@ -594,6 +593,10 @@ class AKConvBPDN(object):
 
             for l in range(self.cri.dimN):
 
+                # Pre x-step
+                Wl = self.convolvedict(l)                # convolvedict
+                self.xstep[l].setdictf(Wl)               # setdictf
+
                 # Solve KCSC
                 self.xstep[l].solve()
 
@@ -609,87 +612,32 @@ class AKConvBPDN(object):
 
             self.itstat.append(self.isc(*itst))      # Cast to global itstats and store
 
-            self.K = self.Kf # ifft transform
+        # Decomposed ifftn
+        for l in range(self.cri.dimN):
+            self.K[l] = sl.irfftn(self.Kf[l], self.cri.Nv[l], 0) # ifft transform
 
         self.j += 1
 
 
-    def setdict(self, D):
+    def setdict(self, D=None):
         """Set dictionary array."""
 
-        self.D = np.asarray(D)
-
-
-    def expandZRankDec(self,l=None):
-        """Expand Kruskal Zl (Rank Decomposed)."""
-
-        Nv = self.cri.Nv
-        R = self.R
-        Z = self.Kf
-
-        if l is not None:
-            Nv = np.delete(Nv,[l-1])            # remove l dimension
-            # R = np.delete(R,[l-1])
-            Z = np.delete(Z,[l-1])
-
-        Nv = np.append(Nv,np.sum(R))
-
-        Tz = tl.tenalg.khatri_rao(Z)
-
-        return tl.base.vec_to_tensor(Tz,Nv)     # as array Tz(N0,N1,...,K*R)
-
-
-    def expandZ(self):
-        """Expand Kruskal Z."""
-
-        Nv = self.cri.Nv
-        R = self.R
-
-        Nv = np.append(Nv,np.sum(R))
-
-        Tzk = np.dot(tl.tenalg.khatri_rao(self.K),self.getweights())
-
-        return tl.base.vec_to_tensor(Tzk,Nv)     # as array Tz(N0,N1,...,K)
-
+        if D is not None:
+            self.D = np.asarray(D, dtype=self.dtype)
+        self.Df = sl.rfftn(self.D, self.cri.Nv, self.cri.axisN)
 
     def convolvedict(self,l=None):
-        """~D: Convolve D w/ Zl."""
+        """W: Convolve D w/ Zl."""
 
-        axisN = self.cri.axisN
+        Df = self.Df
+        Kf = self.Kf
         N = self.cri.N
-        Nv = self.cri.Nv
-        M = self.cri.M                              # Number of filters K
-        dsz = self.cri.dsz                          # Diccionary Size
-        Dd = np.prod(dsz[0:-1])
 
-        Tz = self.expandZRankDec(l)
+        Nl = Nv[l] if l is not None else 1
 
-        # TzFull
-        Tzlst = []
-        for i in range(dsz[l-1]):
-            Tzlst.append(Tz)                        # Z for each j
-
-        TzFull = np.stack(Tzlst,axis=l-1)           # As array Tz(N0,N1,...,Nl,...,K*R)
-
-        # DzFull
-        DFull = np.reshape(self.D,[Dd,M],order='F')
-        DFull = np.dot(DFull,np.transpose(self.getweights()))
-        DFull = np.reshape(DFull,np.append(dsz[0:-1],np.sum(self.R)),order='F') # As array D(N0,N1,...,K*R)
-
-        # Purge l
-        if l is not None:
-            axisN = np.delete(axisN,[l-1])       # remove l dimension
-            Nv = np.delete(Nv,[l-1])
-
-        # Convolve
-        Xf = sl.rfftn(TzFull,None,axisN)
-        Df = sl.rfftn(DFull,Nv,axisN)
-        Dcf = np.multiply(Df,Xf)
-        Dc = sl.irfftn(Dcf,Nv,axisN)
-
-        Dc = np.moveaxis(Dc,l-1,0)              # spatial dimension at first place
-
-        return np.reshape(Dc,[dsz[l-1],np.prod(Nv),np.sum(self.R)],order='F') # As array Dc(Dl,N',K*R)
+        Df_ = np.moveaxis(np.reshape(Df,[Nl,N/Nl],order='F'),[0,1,2],[0,2,1]).squeeze()
+        Q = tl.tenalg.khatri_rao(Kf,skip_matrix=l,reverse=True)
+        return Df_*Q
 
 
     def getweights(self):
@@ -699,13 +647,18 @@ class AKConvBPDN(object):
         for k,Rk in enumerate(self.R):
             weightsArray.append(np.ones([Rk,1]))
 
-        return block_diag(*weightsArray)                 # map from R*K to K
+        return sl.block_diag(*weightsArray)                 # map from R*M to M
 
 
     def getcoef(self):
-        """Get result of inner xstep object."""
+        """Get result of inner xstep object and expand Kruskal."""
 
-        return self.expandZ()
+        Nz = self.cri.Nv
+        Nz.append(self.cri.M)
+
+        Z = np.dot(tl.tenalg.khatri_rao(self.K,reverse=True),self.getweights())
+
+        return tl.base.vec_to_tensor(Z,Nz)     # as array Z(N0,N1,...,M)
 
 
     def getKruskal(self):
@@ -717,10 +670,18 @@ class AKConvBPDN(object):
     def reconstruct(self, X=None):
         """Reconstruct representation."""
 
-        Tz = self.expandZ()
+        Df = self.Df
+        Nz = self.cri.Nv
+        Nz.append(self.cri.M)
 
-        Xf = sl.rfftn(Tz,None,self.cri.axisN)
-        Df = sl.rfftn(self.D,Nv,self.cri.axisN)     # Self.Df is not stored
+        # # Stupid Option
+        # Tz = self.getcoef()
+        # Xf = sl.rfftn(Tz,None,self.cri.axisN)
+
+        #Smart Option
+        Zf = np.dot(tl.tenalg.khatri_rao(self.Kf,reverse=True),self.getweights())
+        Xf = tl.base.vec_to_tensor(Z,Nz)
+
         Sf = np.sum(Df*Xf, axis=self.cri.axisM)
 
         return sl.irfftn(Sf, self.cri.Nv, self.cri.axisN)
