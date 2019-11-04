@@ -20,9 +20,12 @@ import numpy as np
 import tensorly as tl
 from scipy.linalg import block_diag
 
+from sporco import cdict
+from sporco import util
 from sporco import common
 from sporco.admm import admm
 from sporco.admm import cbpdn
+
 import sporco.cnvrep as cr
 import sporco.linalg as sl
 import sporco.prox as sp
@@ -155,353 +158,7 @@ class IterStatsConfig(object):
         print(self.fmtstr % itdsp)
 
 
-
-class GenericConvBPDN(admm.ADMMEqual):
-    r"""
-    Base class for ADMM algorithm for solving variants of the
-    Convolutional BPDN (CBPDN) :cite:`wohlberg-2014-efficient`
-    :cite:`wohlberg-2016-efficient` :cite:`wohlberg-2016-convolutional`
-    problem.
-
-    |
-
-    .. inheritance-diagram:: GenericConvBPDN
-       :parts: 2
-
-    |
-
-    The generic problem form is
-
-    .. math::
-       \mathrm{argmin}_\mathbf{x} \;
-       (1/2) \left\| \sum_m \mathbf{d}_m * \mathbf{x}_m -
-       \mathbf{s} \right\|_2^2 + g( \{ \mathbf{x}_m \} )
-
-    for input image :math:`\mathbf{s}`, dictionary filters
-    :math:`\mathbf{d}_m`, and coefficient maps :math:`\mathbf{x}_m`,
-    and where :math:`g(\cdot)` is a penalty term or the indicator
-    function of a constraint. It is solved via the ADMM problem
-
-    .. math::
-       \mathrm{argmin}_{\mathbf{x}, \mathbf{y}} \;
-       (1/2) \left\| \sum_m \mathbf{d}_m * \mathbf{x}_m -
-       \mathbf{s} \right\|_2^2 + g( \{ \mathbf{y}_m \} )
-       \quad \text{such that} \quad \mathbf{x}_m = \mathbf{y}_m \;\;.
-
-    After termination of the :meth:`solve` method, attribute
-    :attr:`itstat` is a list of tuples representing statistics of each
-    iteration. The fields of the named tuple ``IterationStats`` are:
-
-       ``Iter`` : Iteration number
-
-       ``ObjFun`` : Objective function value
-
-       ``DFid`` : Value of data fidelity term :math:`(1/2) \| \sum_m
-       \mathbf{d}_m * \mathbf{x}_m - \mathbf{s} \|_2^2`
-
-       ``Reg`` : Value of regularisation term
-
-       ``PrimalRsdl`` : Norm of primal residual
-
-       ``DualRsdl`` : Norm of dual residual
-
-       ``EpsPrimal`` : Primal residual stopping tolerance
-       :math:`\epsilon_{\mathrm{pri}}`
-
-       ``EpsDual`` : Dual residual stopping tolerance
-       :math:`\epsilon_{\mathrm{dua}}`
-
-       ``Rho`` : Penalty parameter
-
-       ``XSlvRelRes`` : Relative residual of X step solver
-
-       ``Time`` : Cumulative run time
-    """
-
-
-    class Options(admm.ADMMEqual.Options):
-        """ConvBPDN algorithm options
-
-        Options include all of those defined in
-        :class:`.admm.ADMMEqual.Options`, together with additional options:
-
-          ``AuxVarObj`` : Flag indicating whether the objective
-          function should be evaluated using variable X (``False``) or
-          Y (``True``) as its argument. Setting this flag to ``True``
-          often gives a better estimate of the objective function, but
-          at additional computational cost.
-
-          ``LinSolveCheck`` : Flag indicating whether to compute
-          relative residual of X step solver.
-
-          ``HighMemSolve`` : Flag indicating whether to use a slightly
-          faster algorithm at the expense of higher memory usage.
-
-          ``NonNegCoef`` : Flag indicating whether to force solution to
-          be non-negative.
-
-          ``NoBndryCross`` : Flag indicating whether all solution
-          coefficients corresponding to filters crossing the image
-          boundary should be forced to zero.
-        """
-
-        defaults = copy.deepcopy(admm.ADMMEqual.Options.defaults)
-        # Warning: although __setitem__ below takes care of setting
-        # 'fEvalX' and 'gEvalY' from the value of 'AuxVarObj', this
-        # cannot be relied upon for initialisation since the order of
-        # initialisation of the dictionary keys is not deterministic;
-        # if 'AuxVarObj' is initialised first, the other two keys are
-        # correctly set, but this setting is overwritten when 'fEvalX'
-        # and 'gEvalY' are themselves initialised
-        defaults.update({'AuxVarObj': False, 'fEvalX': True,
-                         'gEvalY': False, 'ReturnX': False,
-                         'HighMemSolve': False, 'LinSolveCheck': False,
-                         'RelaxParam': 1.8, 'NonNegCoef': False,
-                         'NoBndryCross': False})
-        defaults['AutoRho'].update({'Enabled': True, 'Period': 1,
-                                    'AutoScaling': True, 'Scaling': 1000.0,
-                                    'RsdlRatio': 1.2})
-
-
-        def __init__(self, opt=None):
-            """
-            Parameters
-            ----------
-            opt : dict or None, optional (default None)
-              GenericConvBPDN algorithm options
-            """
-
-            if opt is None:
-                opt = {}
-            admm.ADMMEqual.Options.__init__(self, opt)
-
-
-
-        def __setitem__(self, key, value):
-            """Set options 'fEvalX' and 'gEvalY' appropriately when option
-            'AuxVarObj' is set.
-            """
-
-            admm.ADMMEqual.Options.__setitem__(self, key, value)
-
-            if key == 'AuxVarObj':
-                if value is True:
-                    self['fEvalX'] = False
-                    self['gEvalY'] = True
-                else:
-                    self['fEvalX'] = True
-                    self['gEvalY'] = False
-
-
-
-    itstat_fields_objfn = ('ObjFun', 'DFid', 'Reg')
-    itstat_fields_extra = ('XSlvRelRes',)
-    hdrtxt_objfn = ('Fnc', 'DFid', 'Reg')
-    hdrval_objfun = {'Fnc': 'ObjFun', 'DFid': 'DFid', 'Reg': 'Reg'}
-
-
-
-    def __init__(self, D, S, opt=None, dimK=None, dimN=2):
-        """
-        This class supports an arbitrary number of spatial dimensions,
-        `dimN`, with a default of 2. The input dictionary `D` is either
-        `dimN` + 1 dimensional, in which case each spatial component
-        (image in the default case) is assumed to consist of a single
-        channel, or `dimN` + 2 dimensional, in which case the final
-        dimension is assumed to contain the channels (e.g. colour
-        channels in the case of images). The input signal set `S` is
-        either `dimN` dimensional (no channels, only one signal),
-        `dimN` + 1 dimensional (either multiple channels or multiple
-        signals), or `dimN` + 2 dimensional (multiple channels and
-        multiple signals). Determination of problem dimensions is
-        handled by :class:`.cnvrep.CSC_ConvRepIndexing`.
-
-
-        Parameters
-        ----------
-        D : array_like
-          Dictionary array
-        S : array_like
-          Signal array
-        opt : :class:`GenericConvBPDN.Options` object
-          Algorithm options
-        dimK : 0, 1, or None, optional (default None)
-          Number of dimensions in input signal corresponding to multiple
-          independent signals
-        dimN : int, optional (default 2)
-          Number of spatial/temporal dimensions
-        """
-
-        # Set default options if none specified
-        if opt is None:
-            opt = GenericConvBPDN.Options()
-
-        # Infer problem dimensions and set relevant attributes of self
-        if not hasattr(self, 'cri'):
-            self.cri = cr.CSC_ConvRepIndexing(D, S, dimK=dimK, dimN=dimN)
-
-        # Call parent class __init__
-        super(GenericConvBPDN, self).__init__(self.cri.shpX, S.dtype, opt)
-
-        # Reshape D and S to standard layout
-        self.D = np.asarray(D.reshape(self.cri.shpD), dtype=self.dtype)
-        self.S = np.asarray(S.reshape(self.cri.shpS), dtype=self.dtype)
-
-        # Compute signal in DFT domain
-        self.Sf = sl.rfftn(self.S, None, self.cri.axisN)
-
-        # Initialise byte-aligned arrays for pyfftw
-        self.YU = sl.pyfftw_empty_aligned(self.Y.shape, dtype=self.dtype)
-        self.Xf = sl.pyfftw_rfftn_empty_aligned(self.Y.shape, self.cri.axisN,
-                                                self.dtype)
-
-        self.setdict()
-
-
-
-    def setdict(self, D=None):
-        """Set dictionary array."""
-
-        if D is not None:
-            self.D = np.asarray(D, dtype=self.dtype)
-        self.Df = sl.rfftn(self.D, self.cri.Nv, self.cri.axisN)
-        # Compute D^H S
-        self.DSf = np.conj(self.Df) * self.Sf
-        if self.cri.Cd > 1:
-            self.DSf = np.sum(self.DSf, axis=self.cri.axisC, keepdims=True)
-        if self.opt['HighMemSolve'] and self.cri.Cd == 1:
-            self.c = sl.solvedbi_sm_c(self.Df, np.conj(self.Df), self.rho,
-                                      self.cri.axisM)
-        else:
-            self.c = None
-
-
-
-    def getcoef(self):
-        """Get final coefficient array."""
-
-        return self.getmin()
-
-
-
-    def xstep(self):
-        r"""Minimise Augmented Lagrangian with respect to
-        :math:`\mathbf{x}`."""
-
-        self.YU[:] = self.Y - self.U
-
-        b = self.DSf + self.rho * sl.rfftn(self.YU, None, self.cri.axisN)
-        if self.cri.Cd == 1:
-            self.Xf[:] = sl.solvedbi_sm(self.Df, self.rho, b, self.c,
-                                        self.cri.axisM)
-        else:
-            self.Xf[:] = sl.solvemdbi_ism(self.Df, self.rho, b, self.cri.axisM,
-                                          self.cri.axisC)
-
-        self.X = sl.irfftn(self.Xf, self.cri.Nv, self.cri.axisN)
-
-        if self.opt['LinSolveCheck']:
-            Dop = lambda x: sl.inner(self.Df, x, axis=self.cri.axisM)
-            if self.cri.Cd == 1:
-                DHop = lambda x: np.conj(self.Df) * x
-            else:
-                DHop = lambda x: sl.inner(np.conj(self.Df), x,
-                                          axis=self.cri.axisC)
-            ax = DHop(Dop(self.Xf)) + self.rho * self.Xf
-            self.xrrs = sl.rrs(ax, b)
-        else:
-            self.xrrs = None
-
-
-
-    def ystep(self):
-        r"""Minimise Augmented Lagrangian with respect to :math:`\mathbf{y}`.
-        If this method is not overridden, the problem is solved without
-        any regularisation other than the option enforcement of
-        non-negativity of the solution and filter boundary crossing
-        supression. When it is overridden, it should be explicitly
-        called at the end of the overriding method.
-        """
-
-        if self.opt['NonNegCoef']:
-            self.Y[self.Y < 0.0] = 0.0
-        if self.opt['NoBndryCross']:
-            for n in range(0, self.cri.dimN):
-                self.Y[(slice(None),) * n +
-                       (slice(1 - self.D.shape[n], None),)] = 0.0
-
-
-
-    def obfn_fvarf(self):
-        """Variable to be evaluated in computing data fidelity term,
-        depending on ``fEvalX`` option value.
-        """
-
-        return self.Xf if self.opt['fEvalX'] else \
-            sl.rfftn(self.Y, None, self.cri.axisN)
-
-
-
-    def eval_objfn(self):
-        """Compute components of objective function as well as total
-        contribution to objective function.
-        """
-
-        dfd = self.obfn_dfd()
-        reg = self.obfn_reg()
-        obj = dfd + reg[0]
-        return (obj, dfd) + reg[1:]
-
-
-
-    def obfn_dfd(self):
-        r"""Compute data fidelity term :math:`(1/2) \| \sum_m \mathbf{d}_m *
-        \mathbf{x}_m - \mathbf{s} \|_2^2`.
-        """
-
-        Ef = sl.inner(self.Df, self.obfn_fvarf(), axis=self.cri.axisM) - \
-            self.Sf
-        return sl.rfl2norm2(Ef, self.S.shape, axis=self.cri.axisN) / 2.0
-
-
-
-    def obfn_reg(self):
-        """Compute regularisation term(s) and contribution to objective
-        function.
-        """
-
-        raise NotImplementedError()
-
-
-
-    def itstat_extra(self):
-        """Non-standard entries for the iteration stats record tuple."""
-
-        return (self.xrrs,)
-
-
-
-    def rhochange(self):
-        """Updated cached c array when rho changes."""
-
-        if self.opt['HighMemSolve'] and self.cri.Cd == 1:
-            self.c = sl.solvedbi_sm_c(self.Df, np.conj(self.Df), self.rho,
-                                      self.cri.axisM)
-
-
-
-    def reconstruct(self, X=None):
-        """Reconstruct representation."""
-
-        if X is None:
-            X = self.Y
-        Xf = sl.rfftn(X, None, self.cri.axisN)
-        Sf = np.sum(self.Df * Xf, axis=self.cri.axisM)
-        return sl.irfftn(Sf, self.cri.Nv, self.cri.axisN)
-
-
-
-class ConvBPDN(GenericConvBPDN):
+class KConvBPDN(cbpdn.GenericConvBPDN):
     r"""
     ADMM algorithm for the Convolutional BPDN (CBPDN)
     :cite:`wohlberg-2014-efficient` :cite:`wohlberg-2016-efficient`
@@ -593,7 +250,7 @@ class ConvBPDN(GenericConvBPDN):
     """
 
 
-    class Options(GenericConvBPDN.Options):
+    class Options(cbpdn.GenericConvBPDN.Options):
         r"""ConvBPDN algorithm options
 
         Options include all of those defined in
@@ -630,7 +287,6 @@ class ConvBPDN(GenericConvBPDN):
     itstat_fields_objfn = ('ObjFun', 'DFid', 'RegL1')
     hdrtxt_objfn = ('Fnc', 'DFid', u('Regℓ1'))
     hdrval_objfun = {'Fnc': 'ObjFun', 'DFid': 'DFid', u('Regℓ1'): 'RegL1'}
-
 
 
     def __init__(self, D, S, lmbda=None, opt=None, dimK=None, dimN=2):
@@ -761,7 +417,53 @@ class AKConvBPDN(object):
     by the wrapper.
     """
 
-    def __init__(self, D0, S, R, xmethod='convbpdn', lmbda=None, optx=None,
+    class Options(cdict.ConstrainedDict):
+        """AKConvBPDN options.
+
+        Options:
+
+          ``Verbose`` : Flag determining whether iteration status is
+          displayed.
+
+          ``StatusHeader`` : Flag determining whether status header and
+          separator are displayed.
+
+          ``IterTimer`` : Label of the timer to use for iteration times.
+
+          ``MaxMainIter`` : Maximum main iterations.
+
+          ``Callback`` : Callback function to be called at the end of
+          every iteration.
+        """
+
+        defaults = {'Verbose': False, 'StatusHeader': True,
+                    'IterTimer': 'solve', 'MaxMainIter': 50,
+                    'Callback': None}
+
+
+        def __init__(self, opt=None):
+            """
+            Parameters
+            ----------
+            opt : dict or None, optional (default None)
+              DictLearn algorithm options
+            """
+
+            if opt is None:
+                opt = {}
+            cdict.ConstrainedDict.__init__(self, opt)
+
+
+    def __new__(cls, *args, **kwargs):
+        """Create an AKConvBPDN object and start its
+        initialisation timer."""
+
+        instance = super(AKConvBPDN, cls).__new__(cls)
+        instance.timer = util.Timer(['init', 'solve', 'solve_wo_eval'])
+        instance.timer.start('init')
+        return instance
+
+    def __init__(self, D0, S, R, opt=None, lmbda=None, optx=None,
                 dimK=None, dimN=2,*args, **kwargs):
         """
         Parameters
@@ -789,12 +491,9 @@ class AKConvBPDN(object):
           Keyword arguments for constructor of internal xstep object
         """
 
-        # Check method
-        if xmethod.lower() != 'convbpdn' and xmethod.lower() !='convelasticnet':
-            raise ValueError('Parameter xmethod accepted values are: ''ConvBPDN'' '
-                                'and ''ConvElasticNet''')
-        else:
-            self.xmethod = xmethod.lower()
+        if opt is None:
+            opt = AKConvBPDN.Options()
+        self.opt = opt
 
         # Infer outer problem dimensions
         # self.cri = cr.CSC_ConvRepIndexing(D0, S, dimK=dimK, dimN=dimN)
@@ -804,9 +503,9 @@ class AKConvBPDN(object):
         if 'mu' in kwargs:
             mu = kwargs['mu']
         else:
-            mu = [None] * self.cri.dimN
+            mu = [0] * self.cri.dimN
 
-        # Parse lmbda and opt
+        # Parse lmbda and optx
         if lmbda is None: lmbda =  [None] * self.cri.dimN
         if optx is None: optx =  [None] * self.cri.dimN
 
@@ -818,16 +517,26 @@ class AKConvBPDN(object):
 
         # Decomposed Kruskal Initialization
         self.R = R
-        self.Z = []
+        self.Kf = []
         for i,Nvi in enumerate(self.cri.Nv):                    # Ui
-            self.Z.append(np.random.randn(Nvi,np.sum(self.R)))
+            self.Kf.append(np.random.randn(Nvi,np.sum(self.R)))
 
         # Store arguments
-        self.S = S
+        self.S = np.reshape(S,[S.size,1],order='F')     # as a vector column
         self.setdict(D0)
         self.lmbda = lmbda
         self.optx = optx
         self.mu = mu
+
+        # Init KCSC solver
+        # Needs to be initiated inside AKConvBPDN because requires convolvedict() and reshapesignal()
+        self.xstep = []
+        for l in range(self.cri.dimN):
+
+            Wl = self.convolvedict(l+1)                # convolvedict
+
+            self.xstep.append(KConvBPDN(Wl, self.S, self.lmbda[l], self.optx[l],
+                    dimK=self.cri.dimK, dimN=1))
 
         # Init isc
         if isc is None:
@@ -870,49 +579,39 @@ class AKConvBPDN(object):
         # self.IterationStats = self.xstep.IterationStats
 
         self.itstat = []
+        self.j = 0
 
 
     def solve(self):
-        """Call the solve method of the inner cbpdn object and return the
+        """Call the solve method of the inner KConvBPDN object and return the
         result.
         """
 
-        self.xstep = []
-
         itst = []
-        for l in range(self.cri.dimN):
 
-            print("Kruskal l=%i, preparation: " % int(l+1))
+        # Main optimisation iterations
+        for self.j in range(self.j, self.j + self.opt['MaxMainIter']):
 
-            D0c = self.convolvedict(l+1)                # convolvedict
-            Sl = self.reshapesignal(l+1)                # reshapesignal
+            for l in range(self.cri.dimN):
 
-            # Construct 1-dim xstep
-            if self.xmethod == 'convbpdn':              # ConvBPDN
-                self.xstep.append(cbpdn.ConvBPDN(D0c, Sl, self.lmbda[l], self.optx[l],
-                    dimK=self.cri.dimK, dimN=1))
-            else:                                       # ConvElasticNet
-                self.xstep.append(cbpdn.ConvElasticNet(D0c, Sl, self.lmbda[l], self.mu[l],
-                    self.optx[l], dimK=self.cri.dimK, dimN=1))
+                # Solve KCSC
+                self.xstep[l].solve()
 
-            print("Success\nKruskal l=%0i solve time: " % int(l+1))
+                # Post x-step
+                self.Kf[l] = self.xstep[l].getcoef()         # Update Kruskal
 
-            # Solve
-            self.xstep[l].solve()
+                # IterationStats
+                xitstat = self.xstep.itstat[-1] if self.xstep.itstat else \
+                          self.xstep.IterationStats(
+                              *([0.0,] * len(self.xstep.IterationStats._fields)))
 
-            # Post x-step
-            self.Z[l] = self.xstep[l].getcoef()         # Update Kruskal
+                itst += self.isc_lst[l].iterstats(self.j, 0, xitstat, 0) # Accumulate
 
-            # IterationStats
-            xitstat = self.xstep.itstat[-1] if self.xstep.itstat else \
-                      self.xstep.IterationStats(
-                          *([0.0,] * len(self.xstep.IterationStats._fields)))
+            self.itstat.append(self.isc(*itst))      # Cast to global itstats and store
 
-            itst += self.isc_lst[l].iterstats(0, 0, xitstat, 0) # Accumulate
+            self.K = self.Kf # ifft transform
 
-            print("%.2fs" % self.xstep[l].timer.elapsed('solve'), "\n")
-
-        self.itstat.append(self.isc(*itst))      # Cast to global itstats and store
+        self.j += 1
 
 
     def setdict(self, D):
@@ -926,7 +625,7 @@ class AKConvBPDN(object):
 
         Nv = self.cri.Nv
         R = self.R
-        Z = self.Z
+        Z = self.Kf
 
         if l is not None:
             Nv = np.delete(Nv,[l-1])            # remove l dimension
@@ -948,7 +647,7 @@ class AKConvBPDN(object):
 
         Nv = np.append(Nv,np.sum(R))
 
-        Tzk = np.dot(tl.tenalg.khatri_rao(self.Z),self.getweights())
+        Tzk = np.dot(tl.tenalg.khatri_rao(self.K),self.getweights())
 
         return tl.base.vec_to_tensor(Tzk,Nv)     # as array Tz(N0,N1,...,K)
 
@@ -1003,18 +702,6 @@ class AKConvBPDN(object):
         return block_diag(*weightsArray)                 # map from R*K to K
 
 
-    def reshapesignal(self,l):
-        """Reshape S from [N1xN2x...xNp] to [NlxC] array."""
-
-        Nv = self.cri.Nv
-        C = int(self.cri.N/Nv[l-1])
-        Q = self.cri.K              # multi-signal
-
-        Sl = np.moveaxis(self.S,l-1,0)
-
-        return np.reshape(Sl,[Nv[l-1],C,Q],order='F').squeeze()  # As array S(Nl,C,Q)
-
-
     def getcoef(self):
         """Get result of inner xstep object."""
 
@@ -1024,7 +711,7 @@ class AKConvBPDN(object):
     def getKruskal(self):
         """Get decomposed Krukal Z."""
 
-        return self.Z()
+        return self.K()
 
 
     def reconstruct(self, X=None):
