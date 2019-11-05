@@ -168,7 +168,7 @@ class KCSC_ConvRepIndexing(object):
     :class:`.admm.cbpdn.ConvBPDN` and related classes).
     """
 
-    def __init__(self, D, S, dimK=None, dimN=2):
+    def __init__(self, D, S, dimK=None, dimN=1):
         """Initialise a ConvRepIndexing object.
 
         Initialise a ConvRepIndexing object representing dimensions
@@ -324,27 +324,95 @@ class KCSC_ConvRepIndexing(object):
         self.Nv = S.shape[0:dimN]
         self.N = np.prod(np.array(self.Nv))
 
-        self.N_ = D.shape[0:dimN]
+        self.N_ = D.shape[0]
 
-        self.nv = tuple(np.array(self.Nv)/self.N_)
+        self.nv = tuple(np.array(np.array(self.Nv)/self.N_,dtype=int))
 
         # Axis indices for each component of X and internal S and D
-        self.axisN = tuple(range(0, dimN))
-        self.axisC = dimN
-        self.axisK = dimN + 1
-        # self.axisM = dimN + 2
+        self.axisN = tuple(range(2, dimN+2))
+        self.axisC = dimN + 2
+        self.axisK = dimN + 3
+        self.axisM = 1
 
         # Shapes of internal S, D, and X (TO BE DONE, maybe not needed)
         self.shpD = (self.N_,) + (self.M,) + self.nv + (self.Cd,) + (1,)
-        self.shpS = self.Nv  + (1,) + (1,) + (self.C,) + (self.K,) + (1,)
-        self.shpX = (self.M,) + self.Nv + (Cx,) + (self.K,)
+        self.shpS = (1,) + (1,) + self.Nv  + (self.C,) + (self.K,)
+        self.shpX = (1,) + (self.M,) + self.nv + (Cx,) + (self.K,)
 
+        # Number of independent Linear systems
+        self.dimL = np.prod(self.nv)*self.Cd
 
 
     def __str__(self):
         """Return string representation of object."""
 
         return pprint.pformat(vars(self))
+
+
+
+def Kl1Wshape(W, cri):
+    r"""Get internal shape for an :math:`\ell_1` norm weight array.
+
+    Get appropriate internal shape (see
+    :class:`CSC_ConvRepIndexing`) for an :math:`\ell_1` norm weight
+    array `W`, as in option ``L1Weight`` in
+    :class:`.admm.cbpdn.ConvBPDN.Options` and related options classes.
+    The external shape of `W` depends on the external shape of input
+    data array `S` and the size of the final axis (i.e. the number of
+    filters) in dictionary array `D`.  The internal shape of the
+    weight array `W` is required to be compatible for multiplication
+    with the internal sparse representation array `X`.  The simplest
+    criterion for ensuring that the external `W` is compatible with
+    `S` is to ensure that `W` has shape ``S.shape + D.shape[-1:]``,
+    except that non-singleton dimensions may be replaced with
+    singleton dimensions.  If `W` has a single additional axis that is
+    neither a spatial axis nor a filter axis, it is assigned as a
+    channel or multi-signal axis depending on the corresponding
+    assignement in `S`.
+
+    Parameters
+    ----------
+    W : array_like
+      Weight array
+    cri : :class:`CSC_ConvRepIndexing` object
+      Object specifying convolutional representation dimensions
+
+    Returns
+    -------
+    shp : tuple
+      Appropriate internal weight array shape
+    """
+
+    # Number of dimensions in input array `S`
+    sdim = cri.dimN + cri.dimC + cri.dimK
+
+    if W.ndim < sdim:
+        if W.size == 1:
+            # Weight array is a scalar
+            shpW = (1,) * (cri.dimN + 3)
+        else:
+            # Invalid weight array shape
+            raise ValueError('weight array must be scalar or have at least '
+                             'the same number of dimensions as input array')
+    elif W.ndim == sdim:
+        # Weight array has the same number of dimensions as the input array
+        shpW = (1,) * 2 + W.shape
+    else:
+        # Weight array has more dimensions than the input array
+        if W.ndim == cri.dimN + 4:
+            # Weight array is already of the appropriate shape
+            shpW = W.shape
+        else:
+            # # Assume that the final axis in the input array is the filter
+            # # index
+            # shpW = (1,) + W.shape[-1:] + W.shape[0:-1] + (1,) * (2 - cri.dimC - \
+            # cri.dimK)
+
+            # Invalid weight array shape
+            raise ValueError('Internal shape of weight array should match'
+                             'w(1,  M, N0, N1, ... ,  C,   K)')
+
+    return shpW
 
 
 
@@ -456,7 +524,7 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
           the filter index axis.
         """
 
-        defaults = copy.deepcopy(GenericConvBPDN.Options.defaults)
+        defaults = copy.deepcopy(cbpdn.GenericConvBPDN.Options.defaults)
         defaults.update({'L1Weight': 1.0})
 
 
@@ -470,7 +538,7 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
 
             if opt is None:
                 opt = {}
-            GenericConvBPDN.Options.__init__(self, opt)
+            cbpdn.GenericConvBPDN.Options.__init__(self, opt)
 
 
 
@@ -480,7 +548,7 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
                      u('Regℓ1'): 'RegL1', u('Regℓ2'): 'RegL2'}
 
 
-    def __init__(self, Df, Sf, lmbda=None, mu=0.0 opt=None, dimK=None, dimN=1):
+    def __init__(self, Df, Sf, lmbda=None, mu=0.0, opt=None, dimK=None, dimN=1):
         """
         This class supports an arbitrary number of spatial dimensions,
         `dimN`, with a default of 2. The input dictionary `D` is either
@@ -532,11 +600,12 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
         self.set_dtype(opt, Sf.dtype)
 
         # Infer problem dimensions and set relevant attributes of self
-        self.cri = cr.CSC_ConvRepIndexing(Df, Sf, dimK=dimK, dimN=dimN)
+        self.cri = KCSC_ConvRepIndexing(Df, Sf, dimK=dimK, dimN=dimN)
 
         # Reshape D and S to standard layout
         self.Df = np.asarray(Df.reshape(self.cri.shpD), dtype=self.dtype)
         self.Sf = np.asarray(Sf.reshape(self.cri.shpS), dtype=self.dtype)
+        self.Sf_ = np.moveaxis(Sf.reshape([self.cri.nv[0],self.cri.N_,1]),[0,1,2],[2,0,1])
 
         # Set default lambda value if not specified
         if lmbda is None:
@@ -569,14 +638,14 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
         self.Xf = sl.pyfftw_rfftn_empty_aligned(self.Y.shape, self.cri.axisN,
                                                 self.dtype)
 
-        self.setdict()
 
-        # Not 'HighMemSolve' for this class
-        self.c = None
+        self.c = [None] * self.cri.dimL # to be filled with cho_factor
+
+        self.setdictf()
 
         # Set l1 term weight array
         self.wl1 = np.asarray(opt['L1Weight'], dtype=self.dtype)
-        self.wl1 = self.wl1.reshape(cr.l1Wshape(self.wl1, self.cri))
+        self.wl1 = self.wl1.reshape(Kl1Wshape(self.wl1, self.cri))
 
 
     def setdictf(self, Df=None):
@@ -585,19 +654,19 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
         if Df is not None:
             self.Df = Df;
         # Compute D^H S
-        self.DSf = np.conj(self.Df) * self.Sf
+        print('Df shape %s \n' % (self.Df.shape,))
+        print('Sf_ shape %s \n' % (self.Sf_.shape,))
+
+        self.DSf = np.sum(np.conj(self.Df.squeeze()) * self.Sf_, axis=0)
         if self.cri.Cd > 1:
             self.DSf = np.sum(self.DSf, axis=self.cri.axisC, keepdims=True)
 
-        for n in range(self.cri.N)
-        self.c = linalg.cho_factor(np.dot(self.DSf,self.Df),
-            (self.mu + self.rho)* np.identity(self.cri.M,dtype=self.dtype),lower=False,check_finite=True)
-
-
-    def getcoeff(self):
-        """Get final coefficient array (FFT domain)."""
-
-        return self.getmin()
+        Df_full = self.Df.reshape([self.cri.shpD[0],self.cri.shpD[1],self.cri.dimL])
+        for s in range(self.cri.dimL):
+            Df_ = Df_full[:,:,s]
+            Df_H = np.conj(Df_.transpose())
+            self.c[s] = linalg.cho_factor(np.dot(Df_H,Df_) + (self.mu + self.rho) * \
+                        np.identity(self.cri.M,dtype=self.dtype),lower=False,check_finite=True)
 
 
     def uinit(self, ushape):
@@ -619,29 +688,31 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
 
         self.YU[:] = self.Y - self.U
 
-        b = self.DSf + self.rho*sl.rfftn(self.YU, None, self.cri.axisN)
-        # if self.cri.Cd == 1:
-            self.Xf[:] = sl.solvedbi_sm(self.Df, self.mu + self.rho,
-                                        b, self.c, self.cri.axisM)
-            self.Xf[:] = sl.cho_solve_ATAI(self.Df,self.mu + self.rho,
-                                        b, self.c,False)
-        # else:
+        b = (self.DSf + self.rho*sl.rfftn(self.YU, None, self.cri.axisN)).squeeze()
+
+        print('b shape %s \n' % (b.shape,))
+
+        if self.cri.Cd == 1:
+            for s in range(self.cri.dimL):
+                self.Xf[:] = linalg.cho_solve(self.c[s],b[:,s],check_finite=True)
+        else:
+            raise ValueError("Multi-channel dictionary not implemented")
         #     self.Xf[:] = sl.solvemdbi_ism(self.Df, self.mu + self.rho, b,
         #                                   self.cri.axisM, self.cri.axisC)
 
-        # self.X = sl.irfftn(self.Xf, self.cri.Nv, self.cri.axisN)
+        self.X = sl.irfftn(self.Xf, None, self.cri.axisN)
 
-        if self.opt['LinSolveCheck']:
-            Dop = lambda x: sl.inner(self.Df, x, axis=self.cri.axisM)
-            if self.cri.Cd == 1:
-                DHop = lambda x: np.conj(self.Df) * x
-            else:
-                DHop = lambda x: sl.inner(np.conj(self.Df), x,
-                                          axis=self.cri.axisC)
-            ax = DHop(Dop(self.Xf)) + (self.mu + self.rho)*self.Xf
-            self.xrrs = sl.rrs(ax, b)
-        else:
-            self.xrrs = None
+        # if self.opt['LinSolveCheck']:
+        #     Dop = lambda x: sl.inner(self.Df, x, axis=self.cri.axisM)
+        #     if self.cri.Cd == 1:
+        #         DHop = lambda x: np.conj(self.Df) * x
+        #     else:
+        #         DHop = lambda x: sl.inner(np.conj(self.Df), x,
+        #                                   axis=self.cri.axisC)
+        #     ax = DHop(Dop(self.Xf)) + (self.mu + self.rho)*self.Xf
+        #     self.xrrs = sl.rrs(ax, b)
+        # else:
+        #     self.xrrs = None
 
 
     def ystep(self):
@@ -665,15 +736,6 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
 
     def setdict(self):
         """Set dictionary array.
-
-        Overriding this method is required.
-        """
-
-        raise NotImplementedError()
-
-
-    def getcoef(self):
-        """Get final coefficient array.
 
         Overriding this method is required.
         """
@@ -749,7 +811,7 @@ class AKConvBPDN(object):
         return instance
 
 
-    def __init__(self, D0, S, R, opt=None, lmbda=None, optx=None,
+    def __init__(self, D, S, R, opt=None, lmbda=None, optx=None,
                 dimK=None, dimN=2,*args, **kwargs):
         """
         Parameters
@@ -782,57 +844,69 @@ class AKConvBPDN(object):
         self.opt = opt
 
         # Infer outer problem dimensions
-        self.cri = cr.CSC_ConvRepIndexing(D0.shape, S, dimK=dimK, dimN=dimN)
+        self.cri = cr.CSC_ConvRepIndexing(D, S, dimK=dimK, dimN=dimN)
 
-            # Parse mu
-            if 'mu' in kwargs:
-                mu = kwargs['mu']
-            else:
-                mu = [0] * self.cri.dimN
+        # # Set dtype attribute based on S.dtype and opt['DataType']
+        # self.set_dtype(opt, S.dtype)
 
-            # Parse lmbda and optx
-            if lmbda is None: lmbda =  [None] * self.cri.dimN
-            if optx is None: optx =  [None] * self.cri.dimN
+        # Parse mu
+        if 'mu' in kwargs:
+            mu = kwargs['mu']
+        else:
+            mu = [0] * self.cri.dimN
 
-            # Parse isc
-            if 'isc' in kwargs:
-                isc = kwargs['isc']
-            else:
-                isc = None
+        # Parse lmbda and optx
+        if lmbda is None: lmbda =  [None] * self.cri.dimN
+        if optx is None: optx =  [None] * self.cri.dimN
 
-        # Decomposed Kruskal Initialization
-        self.R = R
-        self.Kf = []
-        for i,Nvi in enumerate(self.cri.Nv):                    # Ui
-            self.Kf.append(np.random.randn(Nvi,np.sum(self.R)))
-
-        self.K = [None]*self.cri.dimN
+        # Parse isc
+        if 'isc' in kwargs:
+            isc = kwargs['isc']
+        else:
+            isc = None
 
         # Store parameters
         self.lmbda = lmbda
         self.optx = optx
         self.mu = mu
+        self.R = R
 
         # Reshape D and S to standard layout
-        self.D = np.asarray(D.reshape(self.cri.shpD), dtype=self.dtype)
-        self.S = np.asarray(S.reshape(self.cri.shpS), dtype=self.dtype)
+        self.D = np.asarray(D.reshape(self.cri.shpD), dtype=S.dtype)
+        self.S = np.asarray(S.reshape(self.cri.shpS), dtype=S.dtype)
 
         # Compute signal in DFT domain
         self.Sf = sl.rfftn(self.S, None, self.cri.axisN)
+        # print('Sf shape %s \n' % (self.Sf.shape,))
+        # print('S shape %s \n' % (self.S.shape,))
+        # print('shpS %s \n' % (self.cri.shpS,))
 
         # Signal uni-dim (kruskal)
-        self.Skf = np.reshape(self.Sf,[S.size,1],order='F')
+        self.Skf = np.reshape(self.Sf,[np.prod(np.array(self.Sf.shape)),1],order='F')
 
         self.setdict()
 
+        # Infer outer problem dimensions for fourier domain
+        self.cri_f = cr.CSC_ConvRepIndexing(self.Df, self.Sf, dimK=dimK, dimN=dimN)
+
+        # Decomposed Kruskal Initialization
+        self.Kf = []
+        for i,Nvi in enumerate(self.cri_f.Nv):                    # Ui
+            self.Kf.append(np.random.randn(Nvi,np.sum(self.R)))
+
+        self.K = [None]*self.cri.dimN
+
         # Init KCSC solver (Needs to be initiated inside AKConvBPDN because requires convolvedict() and reshapesignal())
         self.xstep = []
+        self.cri_x = []
         for l in range(self.cri.dimN):
 
             Wl = self.convolvedict(l)                # convolvedict
 
-            self.xstep.append(KConvBPDN(Wl, self.Skf, self.lmbda[l], self.optx[l],
-                    dimK=self.cri.dimK, dimN=1))
+            self.cri_x.append(KCSC_ConvRepIndexing())
+
+            self.xstep.append(KConvBPDN(Wl, self.Skf, self.lmbda[l], self.mu[l],
+                    self.optx[l], dimK=self.cri.dimK, dimN=1))
 
         # Init isc
         if isc is None:
@@ -898,7 +972,7 @@ class AKConvBPDN(object):
                 self.xstep[l].solve()
 
                 # Post x-step
-                self.Kf[l] = self.xstep[l].getcoeff()         # Update Kruskal
+                self.Kf[l] =  sl.rfftn(self.xstep[l].getcoef(), None, 0)         # Update Kruskal
 
                 # IterationStats
                 xitstat = self.xstep.itstat[-1] if self.xstep.itstat else \
@@ -923,27 +997,27 @@ class AKConvBPDN(object):
             self.D = np.asarray(D, dtype=self.dtype)
         self.Df = sl.rfftn(self.D, self.cri.Nv, self.cri.axisN)
 
+        self.Df_mat = np.dot(np.reshape(Df,[N,M]),self.getweights().transpose())    # Df_mat(N,R*M)
+
     def convolvedict(self,l=None):
-        """W: Convolve D w/         # Reshape D and S to standard layout
-        self.D = np.asarray(D.reshape(self.cri.shpD), dtype=self.dtype)
-        self.S = np.asarray(S.reshape(self.cri.shpS), dtype=self.dtype)
+        """W: Convolve D w/."""
 
-        # Compute signal in DFT domain
-        self.Sf = sl.rfftn(self.S, None, self.cri.axisN)
-
-        # Signal uni-dim (kruskal)
-        self.Skf = np.reshape(self.Sf,[S.size,1],order='F')
-
-        self.setdict()Zl."""
-
-        Df = self.Df
+        Df_mat = self.Df_mat
         Kf = self.Kf
-        N = self.cri.N
+        N = self.cri_f.N
+        Nv = self.cri_f.Nv
+        M = self.cri_f.M
 
         Nl = Nv[l] if l is not None else 1
 
-        Df_ = np.moveaxis(np.reshape(Df,[Nl,N/Nl],order='F'),[0,1,2],[0,2,1]).squeeze()
-        Q = tl.tenalg.khatri_rao(Kf,skip_matrix=l,reverse=True)
+        # print('Df shape %s \n' % (Df.shape,))
+        #
+        # Df_mat = np.dot(np.reshape(Df,[N,M]),self.getweights().transpose())
+
+        Df_ = np.moveaxis(np.reshape(Df_mat,[Nl,int(N/Nl),sum(self.R)],order='F'),\
+                        [0,1,2],[2,0,1]).squeeze()
+        Q = np.reshape(tl.tenalg.khatri_rao(Kf,skip_matrix=l,reverse=True),\
+                        [int(N/Nl),sum(self.R),1])
         return Df_*Q
 
 
@@ -954,7 +1028,7 @@ class AKConvBPDN(object):
         for k,Rk in enumerate(self.R):
             weightsArray.append(np.ones([Rk,1]))
 
-        return sl.block_diag(*weightsArray)                 # map from R*M to M
+        return linalg.block_diag(*weightsArray)                 # map from R*M to M
 
 
     def getcoef(self):
@@ -978,7 +1052,7 @@ class AKConvBPDN(object):
         """Reconstruct representation."""
 
         Df = self.Df
-        Nz = self.cri.Nv
+        Nz = self.cri_f.Nv
         Nz.append(self.cri.M)
 
         # # Stupid Option
@@ -994,7 +1068,7 @@ class AKConvBPDN(object):
         return sl.irfftn(Sf, self.cri.Nv, self.cri.axisN)
 
 
-    def getitstat(self):b
+    def getitstat(self):
         """Get iteration stats."""
 
         return self.itstat
