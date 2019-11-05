@@ -17,6 +17,8 @@ from types import MethodType
 import collections
 
 import numpy as np
+import scipy
+from scipy import linalg
 import tensorly as tl
 
 from sporco import cdict
@@ -157,6 +159,195 @@ class IterStatsConfig(object):
         print(self.fmtstr % itdsp)
 
 
+class KCSC_ConvRepIndexing(object):
+    """Array dimensions and indexing for Kruskal CSC problems.
+
+    Manage the inference of problem dimensions and the roles of
+    :class:`numpy.ndarray` indices for convolutional representations in
+    convolutional sparse coding problems (e.g.
+    :class:`.admm.cbpdn.ConvBPDN` and related classes).
+    """
+
+    def __init__(self, D, S, dimK=None, dimN=2):
+        """Initialise a ConvRepIndexing object.
+
+        Initialise a ConvRepIndexing object representing dimensions
+        of S (input signal), D (dictionary), and X (coefficient array)
+        in a convolutional representation.  These dimensions are
+        inferred from the input `D` and `S` as well as from parameters
+        `dimN` and `dimK`.  Management and inferrence of these problem
+        dimensions is not entirely straightforward because
+        :class:`.admm.cbpdn.ConvBPDN` and related classes make use
+        *internally* of S, D, and X arrays with a standard layout
+        (described below), but *input* `S` and `D` are allowed to
+        deviate from this layout for the convenience of the user.
+
+        The most fundamental parameter is `dimN`, which specifies the
+        dimensionality of the spatial/temporal samples being
+        represented (e.g. `dimN` = 2 for representations of 2D
+        images).  This should be common to *input* S and D, and is
+        also common to *internal* S, D, and X.  The remaining
+        dimensions of input `S` can correspond to multiple channels
+        (e.g. for RGB images) and/or multiple signals (e.g. the array
+        contains multiple independent images).  If input `S` contains
+        two additional dimensions (in addition to the `dimN` spatial
+        dimensions), then those are considered to correspond, in
+        order, to channel and signal indices.  If there is only a
+        single additional dimension, then determination whether it
+        represents a channel or signal index is more complicated.  The
+        rule for making this determination is as follows:
+
+        * if `dimK` is set to 0 or 1 instead of the default ``None``,
+          then that value is taken as the number of signal indices in
+          input `S` and any remaining indices are taken as channel
+          indices (i.e. if `dimK` = 0 then dimC = 1 and if `dimK` = 1
+          then dimC = 0).
+        * if `dimK` is ``None`` then the number of channel dimensions is
+          determined from the number of dimensions in the input
+          dictionary `D`. Input `D` should have at least `dimN` + 1
+          dimensions, with the final dimension indexing dictionary
+          filters. If it has exactly `dimN` + 1 dimensions then it is a
+          single-channel dictionary, and input `S` is also assumed to be
+          single-channel, with the additional index in `S` assigned as a
+          signal index (i.e. dimK = 1). Conversely, if input `D` has
+          `dimN` + 2 dimensions it is a multi-channel dictionary, and
+          the additional index in `S` is assigned as a channel index
+          (i.e. dimC = 1).
+
+        Note that it is an error to specify `dimK` = 1 if input `S`
+        has `dimN` + 1 dimensions and input `D` has `dimN` + 2
+        dimensions since a multi-channel dictionary requires a
+        multi-channel signal. (The converse is not true: a
+        multi-channel signal can be decomposed using a single-channel
+        dictionary.)
+
+        The *internal* data layout for S (signal), D (dictionary), and
+        X (coefficient array) is (multi-channel dictionary)
+        ::
+
+            sptl.          chn  sig  flt
+          S(N0,  N1, ...,  C,   K,   1)
+          D(N0,  N1, ...,  C,   1,   M)
+          X(N0,  N1, ...,  1,   K,   M)
+
+        or (single-channel dictionary)
+
+        ::
+
+            sptl.          chn  sig  flt
+          S(N0,  N1, ...,  C,   K,   1)
+          D(N0,  N1, ...,  1,   1,   M)
+          X(N0,  N1, ...,  C,   K,   M)
+
+        where
+
+        * Nv = [N0, N1, ...] and N = N0 x N1 x ... are the vector of sizes
+          of the spatial/temporal indices and the total number of
+          spatial/temporal samples respectively
+        * C is the number of channels in S
+        * K is the number of signals in S
+        * M is the number of filters in D
+
+        It should be emphasised that dimC and `dimK` may take on values
+        0 or 1, and represent the number of channel and signal
+        dimensions respectively *in input S*. In the internal layout
+        of S there is always a dimension allocated for channels and
+        signals. The number of channel dimensions in input `D` and the
+        corresponding size of that index are represented by dimCd
+        and Cd respectively.
+
+        Parameters
+        ----------
+        D : array_like
+          Input dictionary
+        S : array_like
+          Input signal
+        dimK : 0, 1, or None, optional (default None)
+          Number of dimensions in input signal corresponding to multiple
+          independent signals
+        dimN : int, optional (default 2)
+          Number of spatial/temporal dimensions of signal samples
+        """
+
+        # Determine whether dictionary is single- or multi-channel
+        self.dimCd = D.ndim - (dimN + 2)
+        if self.dimCd == 0:
+            self.Cd = 1
+        else:
+            self.Cd = D.shape[-2]
+
+        # Numbers of spatial, channel, and signal dimensions in
+        # external S are dimN, dimC, and dimK respectively. These need
+        # to be calculated since inputs D and S do not already have
+        # the standard data layout above, i.e. singleton dimensions
+        # will not be present
+        if dimK is None:
+            rdim = S.ndim - dimN
+            if rdim == 0:
+                (dimC, dimK) = (0, 0)
+            elif rdim == 1:
+                dimC = self.dimCd  # Assume S has same number of channels as D
+                dimK = S.ndim - dimN - dimC  # Assign remaining channels to K
+            else:
+                (dimC, dimK) = (1, 1)
+        else:
+            dimC = S.ndim - dimN - dimK  # Assign remaining channels to C
+
+        self.dimN = dimN  # Number of spatial dimensions
+        self.dimC = dimC  # Number of channel dimensions in S
+        self.dimK = dimK  # Number of signal dimensions in S
+
+        # Number of channels in S
+        if self.dimC == 1:
+            self.C = S.shape[dimN]
+        else:
+            self.C = 1
+        Cx = self.C - self.Cd + 1
+
+        # Ensure that multi-channel dictionaries used with a signal with a
+        # matching number of channels
+        if self.Cd > 1 and self.C != self.Cd:
+            raise ValueError("Multi-channel dictionary with signal with "
+                             "mismatched number of channels (Cd=%d, C=%d)" %
+                             (self.Cd, self.C))
+
+        # Number of signals in S
+        if self.dimK == 1:
+            self.K = S.shape[self.dimN + self.dimC]
+        else:
+            self.K = 1
+
+        # Number of filters
+        self.M = D.shape[1]     # KCSC std layout D(n',M,n,C)
+
+        # Shape of spatial indices and number of spatial samples
+        self.Nv = S.shape[0:dimN]
+        self.N = np.prod(np.array(self.Nv))
+
+        self.N_ = D.shape[0:dimN]
+
+        self.nv = tuple(np.array(self.Nv)/self.N_)
+
+        # Axis indices for each component of X and internal S and D
+        self.axisN = tuple(range(0, dimN))
+        self.axisC = dimN
+        self.axisK = dimN + 1
+        # self.axisM = dimN + 2
+
+        # Shapes of internal S, D, and X (TO BE DONE, maybe not needed)
+        self.shpD = (self.N_,) + (self.M,) + self.nv + (self.Cd,) + (1,)
+        self.shpS = self.Nv  + (1,) + (1,) + (self.C,) + (self.K,) + (1,)
+        self.shpX = (self.M,) + self.Nv + (Cx,) + (self.K,)
+
+
+
+    def __str__(self):
+        """Return string representation of object."""
+
+        return pprint.pformat(vars(self))
+
+
+
 class KConvBPDN(cbpdn.GenericConvBPDN):
     r"""
     ADMM algorithm for the Convolutional BPDN (CBPDN)
@@ -283,12 +474,13 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
 
 
 
-    itstat_fields_objfn = ('ObjFun', 'DFid', 'RegL1')
-    hdrtxt_objfn = ('Fnc', 'DFid', u('Regℓ1'))
-    hdrval_objfun = {'Fnc': 'ObjFun', 'DFid': 'DFid', u('Regℓ1'): 'RegL1'}
+    itstat_fields_objfn = ('ObjFun', 'DFid', 'RegL1', 'RegL2')
+    hdrtxt_objfn = ('Fnc', 'DFid', u('Regℓ1'), u('Regℓ2'))
+    hdrval_objfun = {'Fnc': 'ObjFun', 'DFid': 'DFid',
+                     u('Regℓ1'): 'RegL1', u('Regℓ2'): 'RegL2'}
 
 
-    def __init__(self, D, S, lmbda=None, opt=None, dimK=None, dimN=2):
+    def __init__(self, Df, Sf, lmbda=None, mu=0.0 opt=None, dimK=None, dimN=1):
         """
         This class supports an arbitrary number of spatial dimensions,
         `dimN`, with a default of 2. The input dictionary `D` is either
@@ -334,21 +526,28 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
 
         # Set default options if none specified
         if opt is None:
-            opt = ConvBPDN.Options()
+            opt = KConvBPDN.Options()
 
         # Set dtype attribute based on S.dtype and opt['DataType']
-        self.set_dtype(opt, S.dtype)
+        self.set_dtype(opt, Sf.dtype)
+
+        # Infer problem dimensions and set relevant attributes of self
+        self.cri = cr.CSC_ConvRepIndexing(Df, Sf, dimK=dimK, dimN=dimN)
+
+        # Reshape D and S to standard layout
+        self.Df = np.asarray(Df.reshape(self.cri.shpD), dtype=self.dtype)
+        self.Sf = np.asarray(Sf.reshape(self.cri.shpS), dtype=self.dtype)
 
         # Set default lambda value if not specified
         if lmbda is None:
-            cri = cr.CSC_ConvRepIndexing(D, S, dimK=dimK, dimN=dimN)
-            Df = sl.rfftn(D.reshape(cri.shpD), cri.Nv, axes=cri.axisN)
-            Sf = sl.rfftn(S.reshape(cri.shpS), axes=cri.axisN)
             b = np.conj(Df) * Sf
             lmbda = 0.1 * abs(b).max()
 
         # Set l1 term scaling
         self.lmbda = self.dtype.type(lmbda)
+
+        # Set l2 term scaling
+        self.mu = self.dtype.type(mu)
 
         # Set penalty parameter
         self.set_attr('rho', opt['rho'], dval=(50.0 * self.lmbda + 1.0),
@@ -362,13 +561,43 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
         self.set_attr('rho_xi', opt['AutoRho', 'RsdlTarget'], dval=rho_xi,
                       dtype=self.dtype)
 
-        # Call parent class __init__
-        super(ConvBPDN, self).__init__(D, S, opt, dimK, dimN)
+        # Call parent class __init__ (not ConvBPDN bc FFT domain data)
+        super(cbpdn.GenericConvBPDN, self).__init__(self.cri.shpX, Sf.dtype, opt)
+
+        # Initialise byte-aligned arrays for pyfftw
+        self.YU = sl.pyfftw_empty_aligned(self.Y.shape, dtype=self.dtype)
+        self.Xf = sl.pyfftw_rfftn_empty_aligned(self.Y.shape, self.cri.axisN,
+                                                self.dtype)
+
+        self.setdict()
+
+        # Not 'HighMemSolve' for this class
+        self.c = None
 
         # Set l1 term weight array
         self.wl1 = np.asarray(opt['L1Weight'], dtype=self.dtype)
         self.wl1 = self.wl1.reshape(cr.l1Wshape(self.wl1, self.cri))
 
+
+    def setdictf(self, Df=None):
+        """Set dictionary array."""
+
+        if Df is not None:
+            self.Df = Df;
+        # Compute D^H S
+        self.DSf = np.conj(self.Df) * self.Sf
+        if self.cri.Cd > 1:
+            self.DSf = np.sum(self.DSf, axis=self.cri.axisC, keepdims=True)
+
+        for n in range(self.cri.N)
+        self.c = linalg.cho_factor(np.dot(self.DSf,self.Df),
+            (self.mu + self.rho)* np.identity(self.cri.M,dtype=self.dtype),lower=False,check_finite=True)
+
+
+    def getcoeff(self):
+        """Get final coefficient array (FFT domain)."""
+
+        return self.getmin()
 
 
     def uinit(self, ushape):
@@ -383,6 +612,37 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
             return (self.lmbda/self.rho)*np.sign(self.Y)
 
 
+    def xstep(self):
+        r"""Minimise Augmented Lagrangian with respect to
+        :math:`\mathbf{x}`.
+        """
+
+        self.YU[:] = self.Y - self.U
+
+        b = self.DSf + self.rho*sl.rfftn(self.YU, None, self.cri.axisN)
+        # if self.cri.Cd == 1:
+            self.Xf[:] = sl.solvedbi_sm(self.Df, self.mu + self.rho,
+                                        b, self.c, self.cri.axisM)
+            self.Xf[:] = sl.cho_solve_ATAI(self.Df,self.mu + self.rho,
+                                        b, self.c,False)
+        # else:
+        #     self.Xf[:] = sl.solvemdbi_ism(self.Df, self.mu + self.rho, b,
+        #                                   self.cri.axisM, self.cri.axisC)
+
+        # self.X = sl.irfftn(self.Xf, self.cri.Nv, self.cri.axisN)
+
+        if self.opt['LinSolveCheck']:
+            Dop = lambda x: sl.inner(self.Df, x, axis=self.cri.axisM)
+            if self.cri.Cd == 1:
+                DHop = lambda x: np.conj(self.Df) * x
+            else:
+                DHop = lambda x: sl.inner(np.conj(self.Df), x,
+                                          axis=self.cri.axisC)
+            ax = DHop(Dop(self.Xf)) + (self.mu + self.rho)*self.Xf
+            self.xrrs = sl.rrs(ax, b)
+        else:
+            self.xrrs = None
+
 
     def ystep(self):
         r"""Minimise Augmented Lagrangian with respect to
@@ -390,18 +650,44 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
 
         self.Y = sp.prox_l1(self.AX + self.U,
                             (self.lmbda / self.rho) * self.wl1)
-        super(ConvBPDN, self).ystep()
-
+        super(cbpdn.ConvBPDN, self).ystep()
 
 
     def obfn_reg(self):
         """Compute regularisation term and contribution to objective
-        function.
+        function. (ConvElasticNet)
         """
 
         rl1 = np.linalg.norm((self.wl1 * self.obfn_gvar()).ravel(), 1)
-        return (self.lmbda*rl1, rl1)
+        rl2 = 0.5*np.linalg.norm(self.obfn_gvar())**2
+        return (self.lmbda*rl1 + self.mu*rl2, rl1, rl2)
 
+
+    def setdict(self):
+        """Set dictionary array.
+
+        Overriding this method is required.
+        """
+
+        raise NotImplementedError()
+
+
+    def getcoef(self):
+        """Get final coefficient array.
+
+        Overriding this method is required.
+        """
+
+        raise NotImplementedError()
+
+
+    def reconstruct(self):
+        """Reconstruct representation.
+
+        Overriding this method is required.
+        """
+
+        raise NotImplementedError()
 
 
 class AKConvBPDN(object):
@@ -462,6 +748,7 @@ class AKConvBPDN(object):
         instance.timer.start('init')
         return instance
 
+
     def __init__(self, D0, S, R, opt=None, lmbda=None, optx=None,
                 dimK=None, dimN=2,*args, **kwargs):
         """
@@ -495,7 +782,7 @@ class AKConvBPDN(object):
         self.opt = opt
 
         # Infer outer problem dimensions
-        self.cri = cr.CDU_ConvRepIndexing(D0.shape, S, dimK=dimK, dimN=dimN)
+        self.cri = cr.CSC_ConvRepIndexing(D0.shape, S, dimK=dimK, dimN=dimN)
 
             # Parse mu
             if 'mu' in kwargs:
@@ -521,12 +808,22 @@ class AKConvBPDN(object):
 
         self.K = [None]*self.cri.dimN
 
-        # Store arguments
-        self.S = np.reshape(S,[S.size,1],order='F')     # as a vector column
-        self.setdict(D0)
+        # Store parameters
         self.lmbda = lmbda
         self.optx = optx
         self.mu = mu
+
+        # Reshape D and S to standard layout
+        self.D = np.asarray(D.reshape(self.cri.shpD), dtype=self.dtype)
+        self.S = np.asarray(S.reshape(self.cri.shpS), dtype=self.dtype)
+
+        # Compute signal in DFT domain
+        self.Sf = sl.rfftn(self.S, None, self.cri.axisN)
+
+        # Signal uni-dim (kruskal)
+        self.Skf = np.reshape(self.Sf,[S.size,1],order='F')
+
+        self.setdict()
 
         # Init KCSC solver (Needs to be initiated inside AKConvBPDN because requires convolvedict() and reshapesignal())
         self.xstep = []
@@ -534,7 +831,7 @@ class AKConvBPDN(object):
 
             Wl = self.convolvedict(l)                # convolvedict
 
-            self.xstep.append(KConvBPDN(Wl, self.S, self.lmbda[l], self.optx[l],
+            self.xstep.append(KConvBPDN(Wl, self.Skf, self.lmbda[l], self.optx[l],
                     dimK=self.cri.dimK, dimN=1))
 
         # Init isc
@@ -601,7 +898,7 @@ class AKConvBPDN(object):
                 self.xstep[l].solve()
 
                 # Post x-step
-                self.Kf[l] = self.xstep[l].getcoef()         # Update Kruskal
+                self.Kf[l] = self.xstep[l].getcoeff()         # Update Kruskal
 
                 # IterationStats
                 xitstat = self.xstep.itstat[-1] if self.xstep.itstat else \
@@ -627,7 +924,17 @@ class AKConvBPDN(object):
         self.Df = sl.rfftn(self.D, self.cri.Nv, self.cri.axisN)
 
     def convolvedict(self,l=None):
-        """W: Convolve D w/ Zl."""
+        """W: Convolve D w/         # Reshape D and S to standard layout
+        self.D = np.asarray(D.reshape(self.cri.shpD), dtype=self.dtype)
+        self.S = np.asarray(S.reshape(self.cri.shpS), dtype=self.dtype)
+
+        # Compute signal in DFT domain
+        self.Sf = sl.rfftn(self.S, None, self.cri.axisN)
+
+        # Signal uni-dim (kruskal)
+        self.Skf = np.reshape(self.Sf,[S.size,1],order='F')
+
+        self.setdict()Zl."""
 
         Df = self.Df
         Kf = self.Kf
@@ -687,7 +994,7 @@ class AKConvBPDN(object):
         return sl.irfftn(Sf, self.cri.Nv, self.cri.axisN)
 
 
-    def getitstat(self):
+    def getitstat(self):b
         """Get iteration stats."""
 
         return self.itstat
