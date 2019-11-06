@@ -168,7 +168,7 @@ class KCSC_ConvRepIndexing(object):
     :class:`.admm.cbpdn.ConvBPDN` and related classes).
     """
 
-    def __init__(self, D, S, dimK=None, dimN=1):
+    def __init__(self, cri_AK, Rank, l):
         """Initialise a ConvRepIndexing object.
 
         Initialise a ConvRepIndexing object representing dimensions
@@ -269,78 +269,94 @@ class KCSC_ConvRepIndexing(object):
           Number of spatial/temporal dimensions of signal samples
         """
 
-        # Determine whether dictionary is single- or multi-channel
-        self.dimCd = D.ndim - (dimN + 2)
-        if self.dimCd == 0:
-            self.Cd = 1
-        else:
-            self.Cd = D.shape[-2]
-
-        # Numbers of spatial, channel, and signal dimensions in
-        # external S are dimN, dimC, and dimK respectively. These need
-        # to be calculated since inputs D and S do not already have
-        # the standard data layout above, i.e. singleton dimensions
-        # will not be present
-        if dimK is None:
-            rdim = S.ndim - dimN
-            if rdim == 0:
-                (dimC, dimK) = (0, 0)
-            elif rdim == 1:
-                dimC = self.dimCd  # Assume S has same number of channels as D
-                dimK = S.ndim - dimN - dimC  # Assign remaining channels to K
-            else:
-                (dimC, dimK) = (1, 1)
-        else:
-            dimC = S.ndim - dimN - dimK  # Assign remaining channels to C
-
-        self.dimN = dimN  # Number of spatial dimensions
-        self.dimC = dimC  # Number of channel dimensions in S
-        self.dimK = dimK  # Number of signal dimensions in S
-
-        # Number of channels in S
-        if self.dimC == 1:
-            self.C = S.shape[dimN]
-        else:
-            self.C = 1
-        Cx = self.C - self.Cd + 1
-
-        # Ensure that multi-channel dictionaries used with a signal with a
-        # matching number of channels
-        if self.Cd > 1 and self.C != self.Cd:
-            raise ValueError("Multi-channel dictionary with signal with "
-                             "mismatched number of channels (Cd=%d, C=%d)" %
-                             (self.Cd, self.C))
-
-        # Number of signals in S
-        if self.dimK == 1:
-            self.K = S.shape[self.dimN + self.dimC]
-        else:
-            self.K = 1
-
-        # Number of filters
-        self.M = D.shape[1]     # KCSC std layout D(n',M,n,C)
+        # # Determine whether dictionary is single- or multi-channel
+        # self.dimCd = D.ndim - (dimN + 2)
+        # if self.dimCd == 0:
+        #     self.Cd = 1
+        # else:
+        #     self.Cd = D.shape[-2]
+        #
+        # # Numbers of spatial, channel, and signal dimensions in
+        # # external S are dimN, dimC, and dimK respectively. These need
+        # # to be calculated since inputs D and S do not already have
+        # # the standard data layout above, i.e. singleton dimensions
+        # # will not be present
+        # if dimK is None:
+        #     rdim = S.ndim - dimN
+        #     if rdim == 0:
+        #         (dimC, dimK) = (0, 0)
+        #     elif rdim == 1:
+        #         dimC = self.dimCd  # Assume S has same number of channels as D
+        #         dimK = S.ndim - dimN - dimC  # Assign remaining channels to K
+        #     else:
+        #         (dimC, dimK) = (1, 1)
+        # else:
+        #     dimC = S.ndim - dimN - dimK  # Assign remaining channels to C
+        #
+        # self.dimN = dimN  # Number of spatial dimensions
+        # self.dimC = dimC  # Number of channel dimensions in S
+        # self.dimK = dimK  # Number of signal dimensions in S
+        #
+        # # Number of channels in S
+        # if self.dimC == 1:
+        #     self.C = S.shape[dimN]
+        # else:
+        #     self.C = 1
+        # Cx = self.C - self.Cd + 1
+        #
+        # # Ensure that multi-channel dictionaries used with a signal with a
+        # # matching number of channels
+        # if self.Cd > 1 and self.C != self.Cd:
+        #     raise ValueError("Multi-channel dictionary with signal with "
+        #                      "mismatched number of channels (Cd=%d, C=%d)" %
+        #                      (self.Cd, self.C))
+        #
+        # # Number of signals in S
+        # if self.dimK == 1:
+        #     self.K = S.shape[self.dimN + self.dimC]
+        # else:
+        #     self.K = 1
+        #
+        # # Number of filters
+        # self.M = D.shape[1]     # KCSC std layout D(n',M,n,C)
+        #
+        # # Shape of spatial indices and number of spatial samples
+        # self.Nv = S.shape[0:dimN]
+        # self.N = np.prod(np.array(self.Nv))
+        #
+        # self.N_ = D.shape[0]
+        #
+        # self.nv = tuple(np.array(np.array(self.Nv)/self.N_,dtype=int))
+        #
+        # # Axis indices for each component of X and internal S and D
+        # self.axisN = tuple(range(2, dimN+2))
+        # self.axisC = dimN + 2
+        # self.axisK = dimN + 3
+        # self.axisM = 1
+        #
+        # # Shapes of internal S, D, and X (TO BE DONE, maybe not needed)
+        # self.shpD = (self.N_,) + (self.M,) + self.nv + (self.Cd,) + (1,)
+        # self.shpS = (1,) + (1,) + self.Nv  + (self.C,) + (self.K,)
+        # self.shpX = (1,) + (self.M,) + self.nv + (Cx,) + (self.K,)
+        #
+        # # Number of independent Linear systems
+        # self.dimL = np.prod(self.nv)*self.Cd
 
         # Shape of spatial indices and number of spatial samples
-        self.Nv = S.shape[0:dimN]
-        self.N = np.prod(np.array(self.Nv))
-
-        self.N_ = D.shape[0]
-
-        self.nv = tuple(np.array(np.array(self.Nv)/self.N_,dtype=int))
+        self.n = cri_AK.Nv[l]
+        self.NC = int(cri_AK.N*cri_AK.Cd/self.n)
+        self.MR = int(np.sum(Rank))
 
         # Axis indices for each component of X and internal S and D
-        self.axisN = tuple(range(2, dimN+2))
-        self.axisC = dimN + 2
-        self.axisK = dimN + 3
-        self.axisM = 1
+        self.axisNC = [0]
+        self.axisMR = [1]
+        self.axisn = [2]
 
-        # Shapes of internal S, D, and X (TO BE DONE, maybe not needed)
-        self.shpD = (self.N_,) + (self.M,) + self.nv + (self.Cd,) + (1,)
-        self.shpS = (1,) + (1,) + self.Nv  + (self.C,) + (self.K,)
-        self.shpX = (1,) + (self.M,) + self.nv + (Cx,) + (self.K,)
+        # Shapes of internal S, D, and X
+        self.shpD = (self.NC,self.MR,self.n)
+        self.shpS = (self.NC,1,self.n)
+        self.shpX = (self.MR,1,self.n)
 
-        # Number of independent Linear systems
-        self.dimL = np.prod(self.nv)*self.Cd
 
 
     def __str__(self):
@@ -384,33 +400,33 @@ def Kl1Wshape(W, cri):
     """
 
     # Number of dimensions in input array `S`
-    sdim = cri.dimN + cri.dimC + cri.dimK
+    sdim = len(cri.shpX) # + cri.dimC + cri.dimK
 
     if W.ndim < sdim:
         if W.size == 1:
             # Weight array is a scalar
-            shpW = (1,) * (cri.dimN + 3)
+            shpW = (1,) * 3
         else:
             # Invalid weight array shape
             raise ValueError('weight array must be scalar or have at least '
                              'the same number of dimensions as input array')
     elif W.ndim == sdim:
         # Weight array has the same number of dimensions as the input array
-        shpW = (1,) * 2 + W.shape
+        shpW = W.shape
     else:
-        # Weight array has more dimensions than the input array
-        if W.ndim == cri.dimN + 4:
-            # Weight array is already of the appropriate shape
-            shpW = W.shape
-        else:
-            # # Assume that the final axis in the input array is the filter
-            # # index
-            # shpW = (1,) + W.shape[-1:] + W.shape[0:-1] + (1,) * (2 - cri.dimC - \
-            # cri.dimK)
+        # # Weight array has more dimensions than the input array
+        # if W.ndim == cri.dimN + 4:
+        #     # Weight array is already of the appropriate shape
+        #     shpW = W.shape
+        # else:
+        #     # # Assume that the final axis in the input array is the filter
+        #     # # index
+        #     # shpW = (1,) + W.shape[-1:] + W.shape[0:-1] + (1,) * (2 - cri.dimC - \
+        #     # cri.dimK)
 
             # Invalid weight array shape
-            raise ValueError('Internal shape of weight array should match'
-                             'w(1,  M, N0, N1, ... ,  C,   K)')
+            raise ValueError('Internal shape of weight array should match shpX'
+                             'w(MR,  1, n)')
 
     return shpW
 
@@ -548,7 +564,7 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
                      u('Regℓ1'): 'RegL1', u('Regℓ2'): 'RegL2'}
 
 
-    def __init__(self, Df, Sf, lmbda=None, mu=0.0, opt=None, dimK=None, dimN=1):
+    def __init__(self, Wf, Sf, cri_K, dtype, lmbda=None, mu=0.0, opt=None):
         """
         This class supports an arbitrary number of spatial dimensions,
         `dimN`, with a default of 2. The input dictionary `D` is either
@@ -597,15 +613,15 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
             opt = KConvBPDN.Options()
 
         # Set dtype attribute based on S.dtype and opt['DataType']
-        self.set_dtype(opt, Sf.dtype)
+        self.set_dtype(opt, dtype)
 
-        # Infer problem dimensions and set relevant attributes of self
-        self.cri = KCSC_ConvRepIndexing(Df, Sf, dimK=dimK, dimN=dimN)
+        # problem dimensions
+        self.cri = cri_K
 
-        # Reshape D and S to standard layout
-        self.Df = np.asarray(Df.reshape(self.cri.shpD), dtype=self.dtype)
+        # Reshape D and S to standard layout (NOT NEEDED in AKConvBPDN)
+        self.Wf = np.asarray(Wf.reshape(self.cri.shpD), dtype=self.dtype)
         self.Sf = np.asarray(Sf.reshape(self.cri.shpS), dtype=self.dtype)
-        self.Sf_ = np.moveaxis(Sf.reshape([self.cri.nv[0],self.cri.N_,1]),[0,1,2],[2,0,1])
+        # self.Sf_ = np.moveaxis(Sf.reshape([self.cri.nv[0],self.cri.N_,1]),[0,1,2],[2,0,1])
 
         # Set default lambda value if not specified
         if lmbda is None:
@@ -635,38 +651,40 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
 
         # Initialise byte-aligned arrays for pyfftw
         self.YU = sl.pyfftw_empty_aligned(self.Y.shape, dtype=self.dtype)
-        self.Xf = sl.pyfftw_rfftn_empty_aligned(self.Y.shape, self.cri.axisN,
-                                                self.dtype)
+        self.Xf = sl.pyfftw_empty_aligned(self.Y.shape, self.dtype)
 
 
-        self.c = [None] * self.cri.dimL # to be filled with cho_factor
+        self.c = [None] * self.cri.n # to be filled with cho_factor
 
         self.setdictf()
+
 
         # Set l1 term weight array
         self.wl1 = np.asarray(opt['L1Weight'], dtype=self.dtype)
         self.wl1 = self.wl1.reshape(Kl1Wshape(self.wl1, self.cri))
 
+        print('L1Weight %s \n' % (self.wl1,))
 
-    def setdictf(self, Df=None):
+
+    def setdictf(self, Wf=None):
         """Set dictionary array."""
 
-        if Df is not None:
-            self.Df = Df;
+        if Wf is not None:
+            self.Wf = Wf;
         # Compute D^H S
-        print('Df shape %s \n' % (self.Df.shape,))
-        print('Sf_ shape %s \n' % (self.Sf_.shape,))
+        print('Df shape %s \n' % (self.Wf.shape,))
+        print('Sf shape %s \n' % (self.Sf.shape,))
 
-        self.DSf = np.sum(np.conj(self.Df.squeeze()) * self.Sf_, axis=0)
-        if self.cri.Cd > 1:
-            self.DSf = np.sum(self.DSf, axis=self.cri.axisC, keepdims=True)
+        self.WSf = (np.sum(np.conj(self.Wf) * self.Sf, axis=0)).squeeze()
+        # if self.cri.Cd > 1:
+        #     self.WSf = np.sum(self.WSf, axis=self.cri.axisC, keepdims=True)
 
-        Df_full = self.Df.reshape([self.cri.shpD[0],self.cri.shpD[1],self.cri.dimL])
-        for s in range(self.cri.dimL):
-            Df_ = Df_full[:,:,s]
+        # Df_full = self.Wf.reshape([self.cri.shpD[0],self.cri.shpD[1],self.cri.n])
+        for s in range(self.cri.n):
+            Df_ = self.Wf[:,:,s]
             Df_H = np.conj(Df_.transpose())
             self.c[s] = linalg.cho_factor(np.dot(Df_H,Df_) + (self.mu + self.rho) * \
-                        np.identity(self.cri.M,dtype=self.dtype),lower=False,check_finite=True)
+                        np.identity(self.cri.MR,dtype=self.dtype),lower=False,check_finite=True)
 
 
     def uinit(self, ushape):
@@ -688,26 +706,28 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
 
         self.YU[:] = self.Y - self.U
 
-        b = (self.DSf + self.rho*sl.rfftn(self.YU, None, self.cri.axisN)).squeeze()
+        print('YU dtype %s \n' % (self.YU.dtype,))
 
-        print('b shape %s \n' % (b.shape,))
+        b = (self.WSf + self.rho*sl.fftn(self.YU, None, self.cri.axisn).squeeze())
 
-        if self.cri.Cd == 1:
-            for s in range(self.cri.dimL):
-                self.Xf[:] = linalg.cho_solve(self.c[s],b[:,s],check_finite=True)
-        else:
-            raise ValueError("Multi-channel dictionary not implemented")
-        #     self.Xf[:] = sl.solvemdbi_ism(self.Df, self.mu + self.rho, b,
+        # print('b shape %s \n' % (b.shape,))
+
+        # if self.cri.Cd == 1:
+        for s in range(self.cri.n):
+            self.Xf[:,0,s] = linalg.cho_solve(self.c[s],b[:,s],check_finite=True)
+        # else:
+        #     raise ValueError("Multi-channel dictionary not implemented")
+        #     self.Xf[:] = sl.solvemdbi_ism(self.Wf, self.mu + self.rho, b,
         #                                   self.cri.axisM, self.cri.axisC)
 
-        self.X = sl.irfftn(self.Xf, None, self.cri.axisN)
+        self.X = sl.irfftn(self.Xf, [self.cri.n], self.cri.axisn)
 
         # if self.opt['LinSolveCheck']:
-        #     Dop = lambda x: sl.inner(self.Df, x, axis=self.cri.axisM)
+        #     Dop = lambda x: sl.inner(self.Wf, x, axis=self.cri.axisM)
         #     if self.cri.Cd == 1:
-        #         DHop = lambda x: np.conj(self.Df) * x
+        #         DHop = lambda x: np.conj(self.Wf) * x
         #     else:
-        #         DHop = lambda x: sl.inner(np.conj(self.Df), x,
+        #         DHop = lambda x: sl.inner(np.conj(self.Wf), x,
         #                                   axis=self.cri.axisC)
         #     ax = DHop(Dop(self.Xf)) + (self.mu + self.rho)*self.Xf
         #     self.xrrs = sl.rrs(ax, b)
@@ -719,9 +739,13 @@ class KConvBPDN(cbpdn.GenericConvBPDN):
         r"""Minimise Augmented Lagrangian with respect to
         :math:`\mathbf{y}`."""
 
-        self.Y = sp.prox_l1(self.AX + self.U,
-                            (self.lmbda / self.rho) * self.wl1)
-        super(cbpdn.ConvBPDN, self).ystep()
+        scalar_factor = (self.lmbda / self.rho) * self.wl1
+        print('AX dtype %s \n' % (self.AX.dtype,))
+        print('U dtype %s \n' % (self.U.dtype,))
+        print('sc_factor shape %s \n' % (scalar_factor.shape,))
+
+        self.Y = sp.prox_l1(self.AX + self.U,(self.lmbda / self.rho) * self.wl1)
+        super(KConvBPDN, self).ystep()
 
 
     def obfn_reg(self):
@@ -846,9 +870,6 @@ class AKConvBPDN(object):
         # Infer outer problem dimensions
         self.cri = cr.CSC_ConvRepIndexing(D, S, dimK=dimK, dimN=dimN)
 
-        # # Set dtype attribute based on S.dtype and opt['DataType']
-        # self.set_dtype(opt, S.dtype)
-
         # Parse mu
         if 'mu' in kwargs:
             mu = kwargs['mu']
@@ -876,37 +897,43 @@ class AKConvBPDN(object):
         self.S = np.asarray(S.reshape(self.cri.shpS), dtype=S.dtype)
 
         # Compute signal in DFT domain
-        self.Sf = sl.rfftn(self.S, None, self.cri.axisN)
+        self.Sf = sl.fftn(self.S, None, self.cri.axisN)
         # print('Sf shape %s \n' % (self.Sf.shape,))
         # print('S shape %s \n' % (self.S.shape,))
         # print('shpS %s \n' % (self.cri.shpS,))
 
         # Signal uni-dim (kruskal)
-        self.Skf = np.reshape(self.Sf,[np.prod(np.array(self.Sf.shape)),1],order='F')
-
-        self.setdict()
-
-        # Infer outer problem dimensions for fourier domain
-        self.cri_f = cr.CSC_ConvRepIndexing(self.Df, self.Sf, dimK=dimK, dimN=dimN)
+        # self.Skf = np.reshape(self.Sf,[np.prod(np.array(self.Sf.shape)),1],order='F')
 
         # Decomposed Kruskal Initialization
+        self.K = []
         self.Kf = []
-        for i,Nvi in enumerate(self.cri_f.Nv):                    # Ui
-            self.Kf.append(np.random.randn(Nvi,np.sum(self.R)))
+        Nvf = []
+        for i,Nvi in enumerate(self.cri.Nv):                    # Ui
+            Ki = np.random.randn(Nvi,np.sum(self.R))
+            Kfi = sl.pyfftw_empty_aligned(Ki.shape, self.Sf.dtype)
+            Kfi[:] = sl.fftn(Ki,None,[0])
+            self.K.append(Ki)
+            self.Kf.append(Kfi)
+            Nvf.append(Kfi.shape[0])
 
-        self.K = [None]*self.cri.dimN
+        self.Nvf = tuple(Nvf)
+
+        # Fourier dimensions
+        self.NC = int(np.prod(self.Nvf)*self.cri.Cd)
+
+        # dict FFT
+        self.setdict()
 
         # Init KCSC solver (Needs to be initiated inside AKConvBPDN because requires convolvedict() and reshapesignal())
         self.xstep = []
-        self.cri_x = []
         for l in range(self.cri.dimN):
 
-            Wl = self.convolvedict(l)                # convolvedict
+            Wl = self.convolvedict(l)                           # convolvedict
+            cri_l = KCSC_ConvRepIndexing(self.cri,self.R,l)     # cri KCSC
 
-            self.cri_x.append(KCSC_ConvRepIndexing())
-
-            self.xstep.append(KConvBPDN(Wl, self.Skf, self.lmbda[l], self.mu[l],
-                    self.optx[l], dimK=self.cri.dimK, dimN=1))
+            self.xstep.append(KConvBPDN(Wl, np.reshape(self.Sf,cri_l.shpS,order='C'), cri_l,\
+                                self.S.dtype, self.lmbda[l], self.mu[l], self.optx[l]))
 
         # Init isc
         if isc is None:
@@ -972,7 +999,8 @@ class AKConvBPDN(object):
                 self.xstep[l].solve()
 
                 # Post x-step
-                self.Kf[l] =  sl.rfftn(self.xstep[l].getcoef(), None, 0)         # Update Kruskal
+                Kl = np.moveaxis(self.xstep[l].getcoef().squeeze(),[0,1],[1,0])
+                self.Kf[l] =  sl.fftn(Kl, None, [0])         # Update Kruskal
 
                 # IterationStats
                 xitstat = self.xstep.itstat[-1] if self.xstep.itstat else \
@@ -985,7 +1013,7 @@ class AKConvBPDN(object):
 
         # Decomposed ifftn
         for l in range(self.cri.dimN):
-            self.K[l] = sl.irfftn(self.Kf[l], self.cri.Nv[l], 0) # ifft transform
+            self.K[l] = sl.irfftn(self.Kf[l], self.cri.Nv[l], [0]) # ifft transform
 
         self.j += 1
 
@@ -995,29 +1023,51 @@ class AKConvBPDN(object):
 
         if D is not None:
             self.D = np.asarray(D, dtype=self.dtype)
-        self.Df = sl.rfftn(self.D, self.cri.Nv, self.cri.axisN)
+        # self.Df = sl.fftn(self.D, self.cri.Nv, self.cri.axisN)
 
-        self.Df_mat = np.dot(np.reshape(Df,[N,M]),self.getweights().transpose())    # Df_mat(N,R*M)
+        print('D shape %s \n' % (self.D.shape,))
+        print('axisN %s \n' % (self.cri.axisN,))
+        print('dimN %s \n' % (self.cri.dimN,))
+
+        # Df = self.D
+        # for l in range(self.cri.dimN):
+        #     Df = sl.fftn(Df, [self.cri.Nv[l]], [self.cri.axisN[l]])
+        # self.Df = Df
+
+        self.Df = sl.fftn(self.D, self.Nvf, self.cri.axisN)
+
+        print('Df shape %s \n' % (self.Df.shape,))
+        print('self.cri.Cd %s \n' % (self.cri.Cd,))
+        print('self.NC %s \n' % (self.NC,))
+        print('self.Nvf %s \n' % (self.Nvf,))
+
+        # if not hasattr(self, 'cri_f'):
+        #     # At first call: Infer outer problem dimensions for fourier domain
+        #     self.cri_f = cr.CSC_ConvRepIndexing(self.Df, self.Sf, dimK=self.cri.dimK, dimN=self.cri.dimN)
+
+        NC = self.NC
+        M = self.cri.M
+
+        self.Df_mat = np.dot(np.reshape(self.Df,[NC,M],order='F'),self.getweights().transpose())    # Df_mat(NC,R*M)
+
 
     def convolvedict(self,l=None):
         """W: Convolve D w/."""
 
         Df_mat = self.Df_mat
         Kf = self.Kf
-        N = self.cri_f.N
-        Nv = self.cri_f.Nv
-        M = self.cri_f.M
 
-        Nl = Nv[l] if l is not None else 1
+        NC = self.NC
 
-        # print('Df shape %s \n' % (Df.shape,))
-        #
-        # Df_mat = np.dot(np.reshape(Df,[N,M]),self.getweights().transpose())
+        Nl = self.Nvf[l] if l is not None else 1
 
-        Df_ = np.moveaxis(np.reshape(Df_mat,[Nl,int(N/Nl),sum(self.R)],order='F'),\
+        print('Kf shape %s \n' % (Kf[l].shape,))
+        print('Nl %s \n' % (Nl,))
+
+        Df_ = np.moveaxis(np.reshape(Df_mat,[Nl,int(NC/Nl),sum(self.R)],order='F'),\
                         [0,1,2],[2,0,1]).squeeze()
         Q = np.reshape(tl.tenalg.khatri_rao(Kf,skip_matrix=l,reverse=True),\
-                        [int(N/Nl),sum(self.R),1])
+                        [int(NC/Nl),sum(self.R),1])
         return Df_*Q
 
 
@@ -1052,7 +1102,7 @@ class AKConvBPDN(object):
         """Reconstruct representation."""
 
         Df = self.Df
-        Nz = self.cri_f.Nv
+        Nz = self.Nvf
         Nz.append(self.cri.M)
 
         # # Stupid Option
@@ -1065,7 +1115,7 @@ class AKConvBPDN(object):
 
         Sf = np.sum(Df*Xf, axis=self.cri.axisM)
 
-        return sl.irfftn(Sf, self.cri.Nv, self.cri.axisN)
+        return sl.ifftn(Sf, self.cri.Nv, self.cri.axisN)
 
 
     def getitstat(self):
